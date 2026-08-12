@@ -6,6 +6,8 @@ backend/.env
 backend/.venv/
 backend/config/.env
 backend/sessions/*.json
+backend/.task_outputs/
+backend/checkpoints.sqlite*
 __pycache__/
 *.pyc
 *.pyo

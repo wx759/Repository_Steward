@@ -4,9 +4,14 @@ import json
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
+
 from config import get_settings
 from graph.agent_factory import build_agent_config, create_agent_from_config
 from graph.llm import build_llm_config_from_settings, get_llm
+from middleware import AgentRunContext, ContextManagementMiddleware
+from service.context_manager import ContextManager, ContextPolicy
 from service.session_manager import SessionManager
 from tools import get_all_tools
 
@@ -30,12 +35,36 @@ class AgentManager:
         self.tools = []
         self._agent_graph = None
         self._agent_graph_tools_id: int | None = None
+        self.context_manager: ContextManager | None = None
+        self._summary_model = None
+        self.checkpointer: BaseCheckpointSaver | None = None
 
-    def initialize(self, base_dir: Path) -> None:
+    def initialize(
+        self,
+        base_dir: Path,
+        *,
+        checkpointer: BaseCheckpointSaver | None = None,
+    ) -> None:
         self.base_dir = base_dir
         self.session_manager = SessionManager(base_dir)
         self.tools = get_all_tools(base_dir)
+        settings = get_settings()
+        self.context_manager = ContextManager(
+            base_dir,
+            ContextPolicy(
+                max_context_tokens=settings.context_max_tokens,
+                context_token_reserve=settings.context_token_reserve,
+                max_messages=settings.context_max_messages,
+                keep_head_messages=settings.context_keep_head_messages,
+                keep_recent_tool_results=settings.context_keep_recent_tool_results,
+                tool_results_budget_bytes=settings.context_tool_results_budget_bytes,
+                preview_chars=settings.context_preview_chars,
+                summary_max_tokens=settings.context_summary_max_tokens,
+            ),
+        )
         self._agent_graph = None
+        self._summary_model = None
+        self.checkpointer = checkpointer
 
     def _build_chat_model(self):
         settings = get_settings()
@@ -52,42 +81,91 @@ class AgentManager:
             raise RuntimeError("AgentManager is not initialized")
         tools_id = id(self.tools)
         if self._agent_graph is None or self._agent_graph_tools_id != tools_id:
+            if self.context_manager is None:
+                raise RuntimeError("Context manager is not initialized")
+            if self._summary_model is None:
+                self._summary_model = self._build_chat_model()
             self._agent_graph = create_agent_from_config(
-                build_agent_config(self.base_dir, self.tools)
+                build_agent_config(
+                    self.base_dir,
+                    self.tools,
+                    middleware=[
+                        ContextManagementMiddleware(
+                            self.context_manager,
+                            self._summary_model,
+                        )
+                    ],
+                    checkpointer=self.checkpointer,
+                )
             )
             self._agent_graph_tools_id = tools_id
         return self._agent_graph
 
     @staticmethod
-    def _build_messages(history: list[dict[str, Any]]) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = []
+    def _build_messages(history: list[Any]) -> list[AnyMessage]:
+        messages: list[AnyMessage] = []
         for item in history:
+            if isinstance(item, BaseMessage):
+                messages.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
             role = item.get("role")
             content = str(item.get("content", "") or "")
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content})
+            if role == "user" and content:
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant" and content:
+                messages.append(AIMessage(content=content))
         return messages
+
+    @staticmethod
+    def _thread_config(session_id: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": session_id}}
+
+    async def load_checkpoint_seed(self, session_id: str) -> list[AnyMessage]:
+        """Seed an empty checkpoint from the complete session archive once."""
+        if self.session_manager is None:
+            raise RuntimeError("AgentManager is not initialized")
+        if self.checkpointer is None:
+            return self.session_manager.load_session_for_agent(session_id)
+        checkpoint = await self.checkpointer.aget_tuple(self._thread_config(session_id))
+        if checkpoint is not None:
+            return []
+        return self.session_manager.load_session_for_agent(session_id)
+
+    async def delete_session(self, session_id: str) -> None:
+        if self.session_manager is None:
+            raise RuntimeError("AgentManager is not initialized")
+        self.session_manager.delete_session(session_id)
+        if self.checkpointer is not None:
+            await self.checkpointer.adelete_thread(session_id)
 
     async def astream(
         self,
         message: str,
-        history: list[dict[str, Any]],
+        history: list[Any],
+        *,
+        session_id: str = "default",
     ) -> AsyncIterator[dict[str, Any]]:
         turn_messages = self._build_messages(history)
-        turn_messages.append({"role": "user", "content": message})
+        current_user_message = HumanMessage(content=message)
+        turn_messages.append(current_user_message)
 
         final_content_parts: list[str] = []
         last_ai_message = ""
         pending_tools: dict[str, dict[str, str]] = {}
+        persisted_turn_messages: list[AnyMessage] = [current_user_message]
 
         async for mode, payload in self._build_agent().astream(
             {"messages": turn_messages},
+            config=self._thread_config(session_id),
+            context=AgentRunContext(session_id=session_id),
             stream_mode=["messages", "updates"],
         ):
             if mode == "messages":
                 chunk, metadata = payload
                 node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
-                if node is not None and node != "agent":
+                if node is not None and node not in {"agent", "model"}:
                     continue
                 text = _stringify_content(getattr(chunk, "content", ""))
                 if text:
@@ -98,12 +176,17 @@ class AgentManager:
             if mode != "updates":
                 continue
 
-            for update in payload.values():
+            for node_name, update in payload.items():
                 if not update:
                     continue
                 for agent_message in update.get("messages", []):
                     message_type = getattr(agent_message, "type", "")
                     tool_calls = getattr(agent_message, "tool_calls", []) or []
+
+                    if node_name in {"agent", "model", "tools"} and isinstance(
+                        agent_message, (AIMessage, ToolMessage)
+                    ):
+                        persisted_turn_messages.append(agent_message)
 
                     if message_type == "ai" and not tool_calls:
                         candidate = _stringify_content(getattr(agent_message, "content", ""))
@@ -139,7 +222,18 @@ class AgentManager:
                         yield {"type": "new_response"}
 
         final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
-        yield {"type": "done", "content": final_content}
+        if final_content and not any(
+            isinstance(item, AIMessage)
+            and not item.tool_calls
+            and _stringify_content(item.content).strip() == final_content
+            for item in persisted_turn_messages
+        ):
+            persisted_turn_messages.append(AIMessage(content=final_content))
+        yield {
+            "type": "done",
+            "content": final_content,
+            "_session_messages": persisted_turn_messages,
+        }
 
     async def generate_title(self, first_user_message: str) -> str:
         prompt = (

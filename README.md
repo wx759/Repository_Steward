@@ -9,6 +9,7 @@ Repository Steward is a small coding-agent core derived from miniOpenClaw. It ke
 - `read_file` and `terminal` tools scoped to the backend workspace.
 - FastAPI chat API with Server-Sent Events.
 - JSON-backed sessions that provide persistent multi-turn context.
+- Four-layer context compaction before every agent model call.
 - File-based prompt components and a lightweight Skill scanner.
 - Next.js chat interface with session management, tool traces, and a prompt inspector.
 
@@ -45,15 +46,46 @@ frontend/
 
 ```text
 POST /api/chat
-  → load session JSON
-  → build messages from saved history
+  → use session_id as LangGraph thread_id
+  → restore the active Agent state from SQLite checkpoint
+  → if no checkpoint exists, seed it once from the session JSON
+  → append the current HumanMessage
   → LangChain create_agent
   → LLM ↔ tools
   → stream SSE events
-  → save user and assistant messages to the same session JSON
+  → checkpoint the active (possibly compacted) Agent state
+  → append the complete turn to the session JSON archive
 ```
 
-The JSON session is the single source of truth for both the UI and agent context. Restarting the API does not discard conversation history.
+The two persistent stores have separate jobs. Session JSON is the complete conversation
+archive used by the UI. `backend/checkpoints.sqlite` is the active Agent state used by
+LangGraph, so compacted context is reused on later turns and after API restarts.
+
+Session files use a small LangChain-aligned schema: `human`, `ai`, and `tool` records.
+Tool calls are linked to tool results with `id` / `tool_call_id`. The Session API projects
+these records into the existing `user` / `assistant` UI shape. The records seed a new
+checkpoint without dropping tool messages. Older UI-oriented session files are migrated when
+they are read. SSE events remain a transport-only format and are not used to rebuild
+persisted messages.
+
+## Context compaction
+
+Every Agent LLM call runs a small middleware pipeline in this order:
+
+1. **L3 tool result budget** persists oversized results under
+   `backend/.task_outputs/tool-results/` and keeps a path plus preview.
+2. **L1 message snip** keeps the initial and recent messages while preserving complete
+   AI tool-call/ToolMessage groups.
+3. **L2 micro compact** keeps only the most recent tool results in full and replaces
+   older results with a placeholder.
+4. **L4 summary** runs only when the first three layers still exceed the configured
+   context budget and rebuilds the Agent context from a summary plus a recent suffix.
+
+The session JSON retains complete UI history. LangGraph stores the compressed active
+Agent state in `backend/checkpoints.sqlite`, keyed by the Session ID as `thread_id`.
+This means L1/L2/L3/L4 state survives later user turns and API restarts.
+Thresholds can be overridden with the `CONTEXT_*` settings shown in
+`backend/config/.env.example`.
 
 ## Setup
 

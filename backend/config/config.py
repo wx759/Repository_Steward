@@ -50,6 +50,14 @@ class Settings:
     llm_base_url: str
     component_char_limit: int = 20_000
     terminal_timeout_seconds: int = 30
+    context_max_tokens: int = 50_000
+    context_token_reserve: int = 8_000
+    context_max_messages: int = 50
+    context_keep_head_messages: int = 3
+    context_keep_recent_tool_results: int = 3
+    context_tool_results_budget_bytes: int = 200_000
+    context_preview_chars: int = 2_000
+    context_summary_max_tokens: int = 2_000
 
 
 def _load_paths() -> tuple[Path, Path, Path]:
@@ -104,6 +112,17 @@ def _base_url(provider: str) -> str:
     return _first_env(*aliases[provider]) or LLM_PROVIDER_DEFAULTS[provider]["base_url"]
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     config_dir, backend_dir, project_root = _load_paths()
@@ -116,4 +135,18 @@ def get_settings() -> Settings:
         llm_model=_model(provider),
         llm_api_key=_api_key(provider),
         llm_base_url=_base_url(provider),
+        context_max_tokens=_positive_int_env("CONTEXT_MAX_TOKENS", 50_000),
+        context_token_reserve=_positive_int_env("CONTEXT_TOKEN_RESERVE", 8_000),
+        context_max_messages=_positive_int_env("CONTEXT_MAX_MESSAGES", 50),
+        context_keep_head_messages=_positive_int_env("CONTEXT_KEEP_HEAD_MESSAGES", 3),
+        context_keep_recent_tool_results=_positive_int_env(
+            "CONTEXT_KEEP_RECENT_TOOL_RESULTS", 3
+        ),
+        context_tool_results_budget_bytes=_positive_int_env(
+            "CONTEXT_TOOL_RESULTS_BUDGET_BYTES", 200_000
+        ),
+        context_preview_chars=_positive_int_env("CONTEXT_PREVIEW_CHARS", 2_000),
+        context_summary_max_tokens=_positive_int_env(
+            "CONTEXT_SUMMARY_MAX_TOKENS", 2_000
+        ),
     )

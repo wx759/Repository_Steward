@@ -43,7 +43,7 @@ class ReadFileTool(BaseTool):
             return "Read failed: file does not exist."
         if file_path.is_dir():
             return "Read failed: path is a directory."
-        return file_path.read_text(encoding="utf-8")[:10000]
+        return file_path.read_text(encoding="utf-8")
 
     async def _arun(
         self,

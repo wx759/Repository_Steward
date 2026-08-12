@@ -6,6 +6,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+
+from service.message_codec import (
+    message_to_record,
+    normalize_persisted_records,
+    records_to_display_messages,
+    records_to_messages,
+)
+
 
 class SessionManager:
     """Small JSON-backed session store used by both the API and the agent."""
@@ -26,6 +35,7 @@ class SessionManager:
             "title": title,
             "created_at": now,
             "updated_at": now,
+            "schema_version": 2,
             "messages": [],
         }
 
@@ -39,7 +49,7 @@ class SessionManager:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(raw, list):
             record = self._default_record(session_id)
-            record["messages"] = raw
+            record["messages"], _ = normalize_persisted_records(raw)
             self._write_session(record)
             return record
 
@@ -48,6 +58,11 @@ class SessionManager:
         raw.setdefault("created_at", time.time())
         raw.setdefault("updated_at", raw["created_at"])
         raw.setdefault("messages", [])
+        raw["messages"], migrated = normalize_persisted_records(raw["messages"])
+        removed_agent_context = raw.pop("agent_context", None) is not None
+        if migrated or removed_agent_context or raw.get("schema_version") != 2:
+            raw["schema_version"] = 2
+            self._write_session(raw)
         return raw
 
     def _write_session(self, record: dict[str, Any]) -> None:
@@ -66,8 +81,8 @@ class SessionManager:
         records: list[dict[str, Any]] = []
         for path in self.sessions_dir.glob("*.json"):
             try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+                record = self._read_session_file(path.stem)
+            except (json.JSONDecodeError, OSError, ValueError):
                 continue
             records.append(
                 {
@@ -75,7 +90,9 @@ class SessionManager:
                     "title": record.get("title", "新会话"),
                     "created_at": record.get("created_at"),
                     "updated_at": record.get("updated_at"),
-                    "message_count": len(record.get("messages", [])),
+                    "message_count": len(
+                        records_to_display_messages(record.get("messages", []))
+                    ),
                 }
             )
         return sorted(records, key=lambda item: item.get("updated_at") or 0, reverse=True)
@@ -86,14 +103,9 @@ class SessionManager:
     def load_session(self, session_id: str) -> list[dict[str, Any]]:
         return self._read_session_file(session_id)["messages"]
 
-    def load_session_for_agent(self, session_id: str) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = []
-        for item in self.load_session(session_id):
-            role = item.get("role")
-            content = str(item.get("content", "") or "")
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content})
-        return messages
+    def load_session_for_agent(self, session_id: str) -> list[AnyMessage]:
+        record = self._read_session_file(session_id)
+        return records_to_messages(record["messages"])
 
     def save_message(
         self,
@@ -102,16 +114,61 @@ class SessionManager:
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        if role == "user":
+            records = [message_to_record(HumanMessage(content=content))]
+        elif role == "assistant":
+            calls = []
+            tool_messages = []
+            for index, call in enumerate(tool_calls or []):
+                call_id = str(call.get("id") or f"saved-{time.time_ns()}-{index}")
+                args = call.get("args", call.get("input", {}))
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"input": args} if args else {}
+                calls.append(
+                    {
+                        "id": call_id,
+                        "name": str(call.get("tool") or call.get("name") or "tool"),
+                        "args": args,
+                        "type": "tool_call",
+                    }
+                )
+                tool_messages.append(
+                    ToolMessage(
+                        content=str(call.get("output", "") or ""),
+                        tool_call_id=call_id,
+                        name=str(call.get("tool") or call.get("name") or "tool"),
+                    )
+                )
+            records = [message_to_record(AIMessage(content=content, tool_calls=calls))]
+            records.extend(message_to_record(message) for message in tool_messages)
+        else:
+            raise ValueError(f"Unsupported saved role: {role}")
+
         record = self._read_session_file(session_id)
-        message: dict[str, Any] = {"role": role, "content": content}
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-        record["messages"].append(message)
+        record["messages"].extend(records)
         self._write_session(record)
-        return message
+        return records[0]
+
+    def append_agent_messages(
+        self,
+        session_id: str,
+        messages: list[AnyMessage],
+    ) -> list[dict[str, Any]]:
+        records = [message_to_record(message) for message in messages]
+        record = self._read_session_file(session_id)
+        record["messages"].extend(records)
+        self._write_session(record)
+        return records
 
     def get_history(self, session_id: str) -> dict[str, Any]:
-        return self._read_session_file(session_id)
+        record = self._read_session_file(session_id)
+        return {
+            **record,
+            "messages": records_to_display_messages(record["messages"]),
+        }
 
     def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
         record = self._read_session_file(session_id)

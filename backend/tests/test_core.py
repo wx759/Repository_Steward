@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import platform
 import sys
+import json
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -12,6 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
 from service.prompt_builder import SYSTEM_COMPONENTS, build_system_prompt
 from service.session_manager import SessionManager
 from graph.agent import AgentManager
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tools import get_all_tools
 from tools.skills_scanner import refresh_snapshot, scan_skills
 
@@ -30,9 +32,104 @@ def test_session_history_is_json_backed_and_agent_ready(tmp_path: Path) -> None:
     manager.save_message(session["id"], "assistant", "auth.py loaded")
 
     reloaded = SessionManager(tmp_path)
-    assert reloaded.load_session_for_agent(session["id"]) == [
-        {"role": "user", "content": "read auth.py"},
-        {"role": "assistant", "content": "auth.py loaded"},
+    restored = reloaded.load_session_for_agent(session["id"])
+    assert [type(message) for message in restored] == [HumanMessage, AIMessage]
+    assert [message.content for message in restored] == ["read auth.py", "auth.py loaded"]
+
+
+def test_session_round_trips_standard_tool_messages_and_projects_ui_history(
+    tmp_path: Path,
+) -> None:
+    manager = SessionManager(tmp_path)
+    session = manager.create_session("tool test")
+    manager.append_agent_messages(
+        session["id"],
+        [
+            HumanMessage(content="read README.md"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "name": "read_file",
+                        "args": {"path": "README.md"},
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="README content",
+                tool_call_id="call-1",
+                name="read_file",
+            ),
+            AIMessage(content="README loaded"),
+        ],
+    )
+
+    raw_messages = manager.load_session(session["id"])
+    assert [message["type"] for message in raw_messages] == [
+        "human",
+        "ai",
+        "tool",
+        "ai",
+    ]
+    assert raw_messages[1]["tool_calls"][0]["id"] == "call-1"
+    assert raw_messages[2]["tool_call_id"] == "call-1"
+
+    restored = manager.load_session_for_agent(session["id"])
+    assert [type(message) for message in restored] == [
+        HumanMessage,
+        AIMessage,
+        ToolMessage,
+        AIMessage,
+    ]
+    assert restored[1].tool_calls[0]["id"] == restored[2].tool_call_id
+    assert restored[2].content == "README content"
+
+    assert manager.get_history(session["id"])["messages"] == [
+        {"role": "user", "content": "read README.md"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "tool": "read_file",
+                    "input": '{"path": "README.md"}',
+                    "output": "README content",
+                }
+            ],
+        },
+        {"role": "assistant", "content": "README loaded"},
+    ]
+
+
+def test_legacy_ui_session_messages_are_migrated_on_read(tmp_path: Path) -> None:
+    manager = SessionManager(tmp_path)
+    session = manager.create_session("legacy")
+    path = tmp_path / "sessions" / f"{session['id']}.json"
+    record = manager.load_session_record(session["id"])
+    record.pop("schema_version", None)
+    record["messages"] = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": "done",
+            "tool_calls": [
+                {"tool": "terminal", "input": '{"command":"pwd"}', "output": "repo"}
+            ],
+        },
+    ]
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    migrated = manager.load_session_record(session["id"])
+    assert migrated["schema_version"] == 2
+    assert [message["type"] for message in migrated["messages"]] == [
+        "human",
+        "ai",
+        "tool",
+    ]
+    assert migrated["messages"][1]["tool_calls"][0]["id"] == migrated["messages"][2][
+        "tool_call_id"
     ]
 
 
@@ -105,14 +202,78 @@ def test_agent_receives_saved_history_before_current_message(tmp_path: Path) -> 
 
     events = asyncio.run(collect_events())
 
-    assert graph.payload == {
-        "messages": [
-            {"role": "user", "content": "read auth.py"},
-            {"role": "assistant", "content": "auth.py loaded"},
-            {"role": "user", "content": "what does it do?"},
-        ]
-    }
-    assert events == [{"type": "done", "content": ""}]
+    graph_messages = graph.payload["messages"]
+    assert [type(message) for message in graph_messages] == [
+        HumanMessage,
+        AIMessage,
+        HumanMessage,
+    ]
+    assert [message.content for message in graph_messages] == [
+        "read auth.py",
+        "auth.py loaded",
+        "what does it do?",
+    ]
+    assert events[0]["type"] == "done"
+    assert events[0]["content"] == ""
+    assert len(events[0]["_session_messages"]) == 1
+    assert isinstance(events[0]["_session_messages"][0], HumanMessage)
+
+
+def test_agent_done_event_contains_standard_messages_from_model_and_tools(
+    tmp_path: Path,
+) -> None:
+    tool_request = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "call-1",
+                "name": "read_file",
+                "args": {"path": "README.md"},
+                "type": "tool_call",
+            }
+        ],
+    )
+    tool_result = ToolMessage(
+        content="README content",
+        tool_call_id="call-1",
+        name="read_file",
+    )
+    final_answer = AIMessage(content="README loaded")
+
+    class FakeGraph:
+        async def astream(self, _payload, **_kwargs):
+            yield "updates", {"model": {"messages": [tool_request]}}
+            yield "updates", {"tools": {"messages": [tool_result]}}
+            yield "updates", {"model": {"messages": [final_answer]}}
+
+    manager = AgentManager()
+    manager.base_dir = tmp_path
+    manager.tools = []
+    manager._agent_graph = FakeGraph()
+    manager._agent_graph_tools_id = id(manager.tools)
+
+    events = asyncio.run(
+        _collect_agent_events(manager, "read README.md", [])
+    )
+    done = events[-1]
+
+    assert done["content"] == "README loaded"
+    persisted = done["_session_messages"]
+    assert [type(message) for message in persisted] == [
+        HumanMessage,
+        AIMessage,
+        ToolMessage,
+        AIMessage,
+    ]
+    assert persisted[1].tool_calls[0]["id"] == persisted[2].tool_call_id
+
+
+async def _collect_agent_events(
+    manager: AgentManager,
+    message: str,
+    history: list,
+) -> list[dict]:
+    return [event async for event in manager.astream(message, history)]
 
 
 def test_fastapi_exposes_only_core_application_routes() -> None:
@@ -130,4 +291,3 @@ def test_fastapi_exposes_only_core_application_routes() -> None:
         "/api/files",
         "/api/skills",
     }.issubset(paths)
-

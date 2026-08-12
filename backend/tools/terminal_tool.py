@@ -70,7 +70,7 @@ class TerminalTool(BaseTool):
 
         combined = (completed.stdout or "") + (completed.stderr or "")
         combined = combined.strip() or "[no output]"
-        return combined[:5000]
+        return combined
 
     async def _arun(
         self,

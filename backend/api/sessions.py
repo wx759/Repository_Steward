@@ -47,7 +47,7 @@ async def rename_session(session_id: str, payload: RenameSessionRequest) -> dict
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict[str, bool]:
-    _session_manager().delete_session(session_id)
+    await agent_manager.delete_session(session_id)
     return {"ok": True}
 
 
@@ -57,7 +57,7 @@ async def get_session_messages(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="Agent manager is not initialized")
     return {
         "system_prompt": build_system_prompt(agent_manager.base_dir),
-        "messages": _session_manager().load_session(session_id),
+        "messages": _session_manager().get_history(session_id)["messages"],
     }
 
 
@@ -69,7 +69,7 @@ async def get_session_history(session_id: str) -> dict[str, Any]:
 @router.post("/sessions/{session_id}/generate-title")
 async def generate_title(session_id: str, payload: GenerateTitleRequest) -> dict[str, str]:
     manager = _session_manager()
-    messages = manager.load_session(session_id)
+    messages = manager.get_history(session_id)["messages"]
     seed = payload.message or next(
         (str(item.get("content", "")) for item in messages if item.get("role") == "user"),
         "",

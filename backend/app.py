@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from api.chat import router as chat_router
 from api.files import router as files_router
@@ -17,8 +18,11 @@ from tools.skills_scanner import refresh_snapshot
 async def lifespan(_: FastAPI):
     settings = get_settings()
     refresh_snapshot(settings.backend_dir)
-    agent_manager.initialize(settings.backend_dir)
-    yield
+    checkpoint_path = settings.backend_dir / "checkpoints.sqlite"
+    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        await checkpointer.setup()
+        agent_manager.initialize(settings.backend_dir, checkpointer=checkpointer)
+        yield
 
 
 app = FastAPI(
