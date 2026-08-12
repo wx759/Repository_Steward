@@ -17,12 +17,71 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from graph.agent_factory import AgentConfig, create_agent_from_config
 from graph.agent import AgentManager
-from middleware import AgentRunContext, ContextManagementMiddleware
+from middleware import (
+    AgentRunContext,
+    ContextManagementMiddleware,
+    ErrorRecoveryMiddleware,
+    RecoveryPolicy,
+)
+from middleware.error_recovery import CONTINUATION_PROMPT
 from service.context_manager import ContextManager, ContextPolicy
 
 
 def test_l4_checkpoint_survives_later_turns_and_database_reopen(tmp_path: Path) -> None:
     asyncio.run(_exercise_checkpoint_recovery(tmp_path))
+
+
+def test_internal_continuation_prompt_is_not_checkpointed(tmp_path: Path) -> None:
+    asyncio.run(_exercise_continuation_checkpoint(tmp_path))
+
+
+async def _exercise_continuation_checkpoint(tmp_path: Path) -> None:
+    database_path = tmp_path / "continuation.sqlite"
+    config = {"configurable": {"thread_id": "continuation-test"}}
+    model = FakeMessagesListChatModel(
+        responses=[
+            AIMessage(content="part-1", response_metadata={"finish_reason": "length"}),
+            AIMessage(content="part-2", response_metadata={"finish_reason": "stop"}),
+        ]
+    )
+    context_manager = ContextManager(
+        tmp_path,
+        ContextPolicy(max_context_tokens=100_000, context_token_reserve=0),
+    )
+
+    async with AsyncSqliteSaver.from_conn_string(str(database_path)) as saver:
+        await saver.setup()
+        graph = create_agent_from_config(
+            AgentConfig(
+                llm=model,
+                tools=[],
+                system_prompt="test",
+                middleware=[
+                    ErrorRecoveryMiddleware(
+                        context_manager,
+                        FakeListChatModel(responses=["unused"]),
+                        RecoveryPolicy(max_retries=0, max_continuations=3),
+                    )
+                ],
+                checkpointer=saver,
+            )
+        )
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="write a long answer")]},
+            config=config,
+            context=AgentRunContext(session_id="continuation-test"),
+        )
+        contents = [str(message.content) for message in result["messages"]]
+        assert contents == ["write a long answer", "part-1part-2"]
+        assert CONTINUATION_PROMPT not in contents
+
+        checkpoint = await saver.aget_tuple(config)
+        assert checkpoint is not None
+        checkpoint_contents = [
+            str(message.content)
+            for message in checkpoint.checkpoint["channel_values"]["messages"]
+        ]
+        assert checkpoint_contents == contents
 
 
 async def _exercise_checkpoint_recovery(tmp_path: Path) -> None:

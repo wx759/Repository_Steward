@@ -9,11 +9,15 @@ import type { ToolCall } from "@/lib/api";
 export function ChatMessage({
   role,
   content,
-  toolCalls
+  toolCalls,
+  status,
+  recoveryMessage
 }: {
   role: "user" | "assistant";
   content: string;
   toolCalls: ToolCall[];
+  status?: "incomplete" | "error";
+  recoveryMessage?: string;
 }) {
   const isUser = role === "user";
   const duplicatesToolOutput = toolCalls.some((call) => call.output.trim() === content.trim());
@@ -32,6 +36,14 @@ export function ChatMessage({
       )}
       {!isUser && !content.trim() && !toolCalls.length && (
         <div className="text-[var(--color-ink-soft)]">正在思考...</div>
+      )}
+      {!isUser && recoveryMessage && (
+        <div className="mt-3 text-sm text-amber-700">{recoveryMessage}</div>
+      )}
+      {!isUser && status === "incomplete" && (
+        <div className="mt-3 text-sm text-amber-700">
+          回答已达到自动续写上限，当前内容可能不完整。可以发送“继续”。
+        </div>
       )}
     </article>
   );

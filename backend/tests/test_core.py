@@ -103,6 +103,32 @@ def test_session_round_trips_standard_tool_messages_and_projects_ui_history(
     ]
 
 
+def test_session_preserves_incomplete_ai_recovery_status(tmp_path: Path) -> None:
+    manager = SessionManager(tmp_path)
+    session = manager.create_session()
+    incomplete = AIMessage(
+        content="partial answer",
+        additional_kwargs={
+            "recovery": {
+                "status": "incomplete",
+                "reason": "max_output_tokens",
+                "continuation_count": 3,
+                "generated_by": "model",
+            }
+        },
+    )
+
+    manager.append_agent_messages(session["id"], [incomplete])
+
+    record = manager.load_session_record(session["id"])["messages"][0]
+    assert record["status"] == "incomplete"
+    assert record["finish_reason"] == "max_output_tokens"
+    restored = manager.load_session_for_agent(session["id"])[0]
+    assert restored.additional_kwargs["recovery"]["status"] == "incomplete"
+    display = manager.get_history(session["id"])["messages"][0]
+    assert display["status"] == "incomplete"
+
+
 def test_legacy_ui_session_messages_are_migrated_on_read(tmp_path: Path) -> None:
     manager = SessionManager(tmp_path)
     session = manager.create_session("legacy")
@@ -266,6 +292,41 @@ def test_agent_done_event_contains_standard_messages_from_model_and_tools(
         AIMessage,
     ]
     assert persisted[1].tool_calls[0]["id"] == persisted[2].tool_call_id
+
+
+def test_agent_forwards_recovery_event_and_incomplete_done_status(tmp_path: Path) -> None:
+    incomplete = AIMessage(
+        content="partial",
+        additional_kwargs={
+            "recovery": {
+                "status": "incomplete",
+                "reason": "max_output_tokens",
+                "continuation_count": 3,
+            }
+        },
+    )
+
+    class FakeGraph:
+        async def astream(self, _payload, **_kwargs):
+            yield "custom", {
+                "type": "recovery",
+                "reason": "overloaded",
+                "message": "模型服务当前过载，正在重试。",
+            }
+            yield "updates", {"model": {"messages": [incomplete]}}
+
+    manager = AgentManager()
+    manager.base_dir = tmp_path
+    manager.tools = []
+    manager._agent_graph = FakeGraph()
+    manager._agent_graph_tools_id = id(manager.tools)
+
+    events = asyncio.run(_collect_agent_events(manager, "question", []))
+
+    assert events[0]["type"] == "recovery"
+    assert events[-1]["status"] == "incomplete"
+    assert events[-1]["reason"] == "max_output_tokens"
+    assert events[-1]["continuation_count"] == 3
 
 
 async def _collect_agent_events(

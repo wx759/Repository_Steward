@@ -58,6 +58,13 @@ class Settings:
     context_tool_results_budget_bytes: int = 200_000
     context_preview_chars: int = 2_000
     context_summary_max_tokens: int = 2_000
+    recovery_max_retries: int = 3
+    recovery_initial_delay_ms: int = 500
+    recovery_max_delay_ms: int = 8_000
+    recovery_max_continuations: int = 3
+    recovery_default_max_output_tokens: int = 8_192
+    recovery_escalated_max_output_tokens: int = 65_536
+    llm_fallback_model: str | None = None
 
 
 def _load_paths() -> tuple[Path, Path, Path]:
@@ -149,4 +156,19 @@ def get_settings() -> Settings:
         context_summary_max_tokens=_positive_int_env(
             "CONTEXT_SUMMARY_MAX_TOKENS", 2_000
         ),
+        recovery_max_retries=_positive_int_env("RECOVERY_MAX_RETRIES", 3),
+        recovery_initial_delay_ms=_positive_int_env(
+            "RECOVERY_INITIAL_DELAY_MS", 500
+        ),
+        recovery_max_delay_ms=_positive_int_env("RECOVERY_MAX_DELAY_MS", 8_000),
+        recovery_max_continuations=_positive_int_env(
+            "RECOVERY_MAX_CONTINUATIONS", 3
+        ),
+        recovery_default_max_output_tokens=_positive_int_env(
+            "RECOVERY_DEFAULT_MAX_OUTPUT_TOKENS", 8_192
+        ),
+        recovery_escalated_max_output_tokens=_positive_int_env(
+            "RECOVERY_ESCALATED_MAX_OUTPUT_TOKENS", 65_536
+        ),
+        llm_fallback_model=_first_env("LLM_FALLBACK_MODEL"),
     )

@@ -42,6 +42,8 @@ export function ChatPanel() {
               key={message.id}
               role={message.role}
               toolCalls={message.toolCalls}
+              status={message.status}
+              recoveryMessage={message.recoveryMessage}
             />
           ))}
           <div ref={endRef} />

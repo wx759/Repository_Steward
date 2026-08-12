@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -16,6 +17,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.utils import count_tokens_approximately
+
+from service.model_recovery import classify_model_error, retry_delay
 
 
 TOOL_RESULT_PLACEHOLDER = "[Earlier tool result compacted. Re-run the tool if needed.]"
@@ -44,6 +47,9 @@ class ContextPolicy:
     summary_max_tokens: int = 2_000
     summary_input_chars: int = 80_000
     summary_keep_recent_messages: int = 6
+    summary_max_retries: int = 3
+    summary_retry_initial_seconds: float = 0.5
+    summary_retry_max_seconds: float = 8.0
 
 
 @dataclass(frozen=True)
@@ -291,6 +297,8 @@ class ContextManager:
         summary_model: BaseChatModel,
         run_id: str = "default",
         keep_recent_after_summary: bool = True,
+        force_summary: bool = False,
+        on_recovery: Callable[[dict[str, Any]], None] | None = None,
     ) -> ContextManagementResult:
         managed, l3_changed = apply_tool_result_budget(
             messages,
@@ -314,7 +322,7 @@ class ContextManager:
             managed,
             reserve_tokens=self.policy.context_token_reserve,
         )
-        if token_count <= self.policy.max_context_tokens:
+        if token_count <= self.policy.max_context_tokens and not force_summary:
             return ContextManagementResult(messages=managed, changed=changed)
 
         preserved: list[AnyMessage] = []
@@ -341,7 +349,11 @@ class ContextManager:
             messages_to_summarize = managed
             preserved = []
 
-        summary = await self._summarize(messages_to_summarize, summary_model)
+        summary = await self._summarize(
+            messages_to_summarize,
+            summary_model,
+            on_recovery=on_recovery,
+        )
         summary_message = HumanMessage(
             content=f"[Compacted context]\n\n{summary}",
             additional_kwargs={
@@ -359,15 +371,45 @@ class ContextManager:
         self,
         messages: Sequence[BaseMessage],
         model: BaseChatModel,
+        *,
+        on_recovery: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
         conversation = _serialize_messages(messages, self.policy.summary_input_chars)
-        response = await model.ainvoke(
-            [
-                SystemMessage(content=SUMMARY_PROMPT),
-                HumanMessage(content=conversation),
-            ],
-            max_tokens=self.policy.summary_max_tokens,
-        )
+        response = None
+        for attempt in range(self.policy.summary_max_retries + 1):
+            try:
+                response = await model.ainvoke(
+                    [
+                        SystemMessage(content=SUMMARY_PROMPT),
+                        HumanMessage(content=conversation),
+                    ],
+                    max_tokens=self.policy.summary_max_tokens,
+                )
+                break
+            except Exception as exc:
+                classified = classify_model_error(exc)
+                if not classified.retryable or attempt >= self.policy.summary_max_retries:
+                    raise
+                delay = retry_delay(
+                    attempt,
+                    initial_delay=self.policy.summary_retry_initial_seconds,
+                    max_delay=self.policy.summary_retry_max_seconds,
+                    retry_after=classified.retry_after,
+                )
+                if on_recovery is not None:
+                    on_recovery(
+                        {
+                            "type": "recovery",
+                            "reason": f"summary_{classified.reason}",
+                            "attempt": attempt + 1,
+                            "max_attempts": self.policy.summary_max_retries,
+                            "delay_seconds": round(delay, 2),
+                            "message": "上下文总结模型暂时不可用，正在重试。",
+                        }
+                    )
+                await asyncio.sleep(delay)
+        if response is None:
+            raise RuntimeError("Context summary model did not return a response")
         summary = _content_text(response.content).strip()
         if not summary:
             raise RuntimeError("Context summary model returned empty content")

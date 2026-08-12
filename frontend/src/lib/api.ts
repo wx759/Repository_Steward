@@ -21,6 +21,9 @@ export type SessionHistory = {
     role: "user" | "assistant";
     content: string;
     tool_calls?: ToolCall[];
+    status?: "incomplete" | "error";
+    finish_reason?: string;
+    continuation_count?: number;
   }>;
 };
 

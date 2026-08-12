@@ -21,6 +21,8 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   toolCalls: ToolCall[];
+  status?: "incomplete" | "error";
+  recoveryMessage?: string;
 };
 
 type AppStore = {
@@ -60,7 +62,8 @@ function toUiMessages(history: Awaited<ReturnType<typeof getSessionHistory>>["me
     id: makeId(),
     role: message.role,
     content: message.content ?? "",
-    toolCalls: message.tool_calls ?? []
+    toolCalls: message.tool_calls ?? [],
+    status: message.status
   }));
 }
 
@@ -138,11 +141,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (event === "token") {
             patchAssistant((message) => ({
               ...message,
-              content: `${message.content}${String(data.content ?? "")}`
+              content: `${message.content}${String(data.content ?? "")}`,
+              recoveryMessage: undefined
+            }));
+          } else if (event === "recovery") {
+            patchAssistant((message) => ({
+              ...message,
+              recoveryMessage: String(data.message ?? "正在尝试恢复模型调用……")
             }));
           } else if (event === "tool_start") {
             patchAssistant((message) => ({
               ...message,
+              recoveryMessage: undefined,
               toolCalls: [...message.toolCalls, {
                 tool: String(data.tool ?? "tool"),
                 input: String(data.input ?? ""),
@@ -161,15 +171,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
             activeAssistantId = next.id;
             setMessages((previous) => [...previous, next]);
           } else if (event === "done") {
-            patchAssistant((message) => message.content ? message : {
-              ...message, content: String(data.content ?? "")
-            });
+            patchAssistant((message) => ({
+              ...message,
+              content: message.content || String(data.content ?? ""),
+              status: data.status === "incomplete" || data.status === "error"
+                ? data.status
+                : undefined,
+              recoveryMessage: undefined
+            }));
           } else if (event === "title") {
             void refreshSessions();
           } else if (event === "error") {
             patchAssistant((message) => ({
               ...message,
-              content: message.content || `请求失败：${String(data.error ?? "unknown error")}`
+              content: message.content || `请求失败：${String(data.error ?? "unknown error")}`,
+              status: "error",
+              recoveryMessage: undefined
             }));
           }
         }

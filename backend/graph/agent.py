@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain.agents.middleware import ToolErrorMiddleware
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolMessage,
+)
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from config import get_settings
 from graph.agent_factory import build_agent_config, create_agent_from_config
 from graph.llm import build_llm_config_from_settings, get_llm
-from middleware import AgentRunContext, ContextManagementMiddleware
+from middleware import (
+    AgentRunContext,
+    ContextManagementMiddleware,
+    ErrorRecoveryMiddleware,
+    RecoveryPolicy,
+)
 from service.context_manager import ContextManager, ContextPolicy
 from service.session_manager import SessionManager
 from tools import get_all_tools
@@ -60,6 +74,11 @@ class AgentManager:
                 tool_results_budget_bytes=settings.context_tool_results_budget_bytes,
                 preview_chars=settings.context_preview_chars,
                 summary_max_tokens=settings.context_summary_max_tokens,
+                summary_max_retries=settings.recovery_max_retries,
+                summary_retry_initial_seconds=(
+                    settings.recovery_initial_delay_ms / 1000
+                ),
+                summary_retry_max_seconds=(settings.recovery_max_delay_ms / 1000),
             ),
         )
         self._agent_graph = None
@@ -85,6 +104,18 @@ class AgentManager:
                 raise RuntimeError("Context manager is not initialized")
             if self._summary_model is None:
                 self._summary_model = self._build_chat_model()
+            settings = get_settings()
+            fallback_model = None
+            if settings.llm_fallback_model:
+                fallback_config = replace(
+                    build_llm_config_from_settings(
+                        settings,
+                        temperature=0.0,
+                        streaming=True,
+                    ),
+                    model=settings.llm_fallback_model,
+                )
+                fallback_model = get_llm(fallback_config)
             self._agent_graph = create_agent_from_config(
                 build_agent_config(
                     self.base_dir,
@@ -93,7 +124,34 @@ class AgentManager:
                         ContextManagementMiddleware(
                             self.context_manager,
                             self._summary_model,
-                        )
+                        ),
+                        ErrorRecoveryMiddleware(
+                            self.context_manager,
+                            self._summary_model,
+                            RecoveryPolicy(
+                                max_retries=settings.recovery_max_retries,
+                                initial_delay_seconds=(
+                                    settings.recovery_initial_delay_ms / 1000
+                                ),
+                                max_delay_seconds=(
+                                    settings.recovery_max_delay_ms / 1000
+                                ),
+                                max_continuations=settings.recovery_max_continuations,
+                                default_max_output_tokens=(
+                                    settings.recovery_default_max_output_tokens
+                                ),
+                                escalated_max_output_tokens=(
+                                    settings.recovery_escalated_max_output_tokens
+                                ),
+                            ),
+                            fallback_model=fallback_model,
+                        ),
+                        ToolErrorMiddleware(
+                            lambda exc, request: (
+                                f"{request.tool_call.get('name', 'tool')} failed with "
+                                f"{type(exc).__name__}. Check the arguments or use another tool."
+                            )
+                        ),
                     ],
                     checkpointer=self.checkpointer,
                 )
@@ -155,13 +213,19 @@ class AgentManager:
         last_ai_message = ""
         pending_tools: dict[str, dict[str, str]] = {}
         persisted_turn_messages: list[AnyMessage] = [current_user_message]
+        run_context = AgentRunContext(session_id=session_id)
 
         async for mode, payload in self._build_agent().astream(
             {"messages": turn_messages},
             config=self._thread_config(session_id),
-            context=AgentRunContext(session_id=session_id),
-            stream_mode=["messages", "updates"],
+            context=run_context,
+            stream_mode=["messages", "updates", "custom"],
         ):
+            if mode == "custom":
+                if isinstance(payload, dict) and payload.get("type") == "recovery":
+                    yield payload
+                continue
+
             if mode == "messages":
                 chunk, metadata = payload
                 node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
@@ -169,6 +233,7 @@ class AgentManager:
                     continue
                 text = _stringify_content(getattr(chunk, "content", ""))
                 if text:
+                    run_context.recovery_state.current_stream_text += text
                     final_content_parts.append(text)
                     yield {"type": "token", "content": text}
                 continue
@@ -179,13 +244,29 @@ class AgentManager:
             for node_name, update in payload.items():
                 if not update:
                     continue
-                for agent_message in update.get("messages", []):
+                update_messages = list(update.get("messages", []))
+                if any(isinstance(item, RemoveMessage) for item in update_messages):
+                    update_messages = [
+                        next(
+                            (
+                                item
+                                for item in reversed(update_messages)
+                                if isinstance(item, AIMessage)
+                            ),
+                            update_messages[-1],
+                        )
+                    ]
+                for agent_message in update_messages:
                     message_type = getattr(agent_message, "type", "")
                     tool_calls = getattr(agent_message, "tool_calls", []) or []
 
-                    if node_name in {"agent", "model", "tools"} and isinstance(
-                        agent_message, (AIMessage, ToolMessage)
-                    ):
+                    is_recovery_message = bool(
+                        getattr(agent_message, "additional_kwargs", {}).get("recovery")
+                    )
+                    if (
+                        node_name in {"agent", "model", "tools"}
+                        or is_recovery_message
+                    ) and isinstance(agent_message, (AIMessage, ToolMessage)):
                         persisted_turn_messages.append(agent_message)
 
                     if message_type == "ai" and not tool_calls:
@@ -229,9 +310,25 @@ class AgentManager:
             for item in persisted_turn_messages
         ):
             persisted_turn_messages.append(AIMessage(content=final_content))
+        final_ai = next(
+            (
+                item
+                for item in reversed(persisted_turn_messages)
+                if isinstance(item, AIMessage) and not item.tool_calls
+            ),
+            None,
+        )
+        recovery = (
+            final_ai.additional_kwargs.get("recovery", {})
+            if final_ai is not None
+            else {}
+        )
         yield {
             "type": "done",
             "content": final_content,
+            "status": recovery.get("status", "completed"),
+            "reason": recovery.get("reason"),
+            "continuation_count": recovery.get("continuation_count", 0),
             "_session_messages": persisted_turn_messages,
         }
 

@@ -24,3 +24,4 @@ frontend/.npm-cache/
 *.log
 .DS_Store
 Thumbs.db
+sessions/

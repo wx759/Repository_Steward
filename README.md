@@ -10,6 +10,7 @@ Repository Steward is a small coding-agent core derived from miniOpenClaw. It ke
 - FastAPI chat API with Server-Sent Events.
 - JSON-backed sessions that provide persistent multi-turn context.
 - Four-layer context compaction before every agent model call.
+- Model error recovery with backoff, forced L4 retry, and output continuation.
 - File-based prompt components and a lightweight Skill scanner.
 - Next.js chat interface with session management, tool traces, and a prompt inspector.
 
@@ -86,6 +87,19 @@ Agent state in `backend/checkpoints.sqlite`, keyed by the Session ID as `thread_
 This means L1/L2/L3/L4 state survives later user turns and API restarts.
 Thresholds can be overridden with the `CONTEXT_*` settings shown in
 `backend/config/.env.example`.
+
+## Error recovery
+
+Model calls are wrapped by an Agent middleware that retries transient 429, 529,
+5xx, timeout, and connection failures with exponential backoff. Recovery progress
+is streamed to the UI without becoming conversation history. A provider-reported
+context overflow forces the existing L4 summary once for that user turn. Output
+length truncation keeps generated text and continues internally up to three times;
+if still truncated, the merged answer is persisted with `status: incomplete`.
+
+The optional `LLM_FALLBACK_MODEL` uses the same provider, base URL, and API key and
+is disabled when empty. Retry and continuation limits use the `RECOVERY_*` settings
+in `backend/config/.env.example`.
 
 ## Setup
 

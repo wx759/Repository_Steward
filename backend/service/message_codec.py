@@ -37,6 +37,12 @@ def message_to_record(message: AnyMessage) -> dict[str, Any]:
                 }
                 for call in message.tool_calls
             ]
+        recovery = message.additional_kwargs.get("recovery", {})
+        if recovery.get("status") in {"incomplete", "error"}:
+            record["status"] = recovery["status"]
+            record["finish_reason"] = recovery.get("reason")
+            record["continuation_count"] = recovery.get("continuation_count", 0)
+            record["recovery_attempts"] = recovery.get("attempts", 0)
         return record
 
     if isinstance(message, ToolMessage):
@@ -60,8 +66,20 @@ def record_to_message(record: dict[str, Any]) -> AnyMessage:
     if message_type == "human":
         return HumanMessage(content=content)
     if message_type == "ai":
+        additional_kwargs: dict[str, Any] = {}
+        if record.get("status") in {"incomplete", "error"}:
+            additional_kwargs["recovery"] = {
+                "status": record["status"],
+                "reason": record.get("finish_reason"),
+                "continuation_count": record.get("continuation_count", 0),
+                "attempts": record.get("recovery_attempts", 0),
+                "generated_by": (
+                    "system" if record["status"] == "error" else "model"
+                ),
+            }
         return AIMessage(
             content=content,
+            additional_kwargs=additional_kwargs,
             tool_calls=[
                 {
                     "id": str(call.get("id") or call.get("name") or "tool-call"),
@@ -160,6 +178,12 @@ def records_to_display_messages(
                 "role": "assistant",
                 "content": content_to_text(record.get("content", "")),
             }
+            if record.get("status") in {"incomplete", "error"}:
+                message["status"] = record["status"]
+                message["finish_reason"] = record.get("finish_reason")
+                message["continuation_count"] = record.get(
+                    "continuation_count", 0
+                )
             calls = [call for call in record.get("tool_calls", []) if isinstance(call, dict)]
             if calls:
                 message["tool_calls"] = []
