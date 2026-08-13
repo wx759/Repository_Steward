@@ -3,40 +3,66 @@
 @tailwind utilities;
 
 :root {
-  --color-ink: #0d2530;
-  --color-ink-soft: rgba(13, 37, 48, 0.7);
-  --color-sand: #f5efe2;
-  --color-frost: rgba(255, 252, 246, 0.72);
-  --color-line: rgba(13, 37, 48, 0.12);
-  --color-ocean: #0f8b8d;
-  --color-ocean-soft: rgba(15, 139, 141, 0.12);
-  --color-ember: #d46a4a;
-  --color-ember-soft: rgba(212, 106, 74, 0.12);
+  color-scheme: light;
+  --color-ink: #182033;
+  --color-ink-soft: #697386;
+  --color-sand: #f4f6fb;
+  --color-frost: rgba(255, 255, 255, 0.88);
+  --color-line: rgba(24, 32, 51, 0.1);
+  --color-ocean: #6859d9;
+  --color-ocean-soft: rgba(104, 89, 217, 0.09);
+  --color-ember: #b96620;
+  --color-ember-soft: rgba(185, 102, 32, 0.09);
+  --color-success: #178d65;
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #c7ccda transparent;
 }
 
 html,
 body {
   margin: 0;
   min-height: 100%;
-  background:
-    radial-gradient(circle at top left, rgba(15, 139, 141, 0.22), transparent 35%),
-    radial-gradient(circle at bottom right, rgba(212, 106, 74, 0.16), transparent 30%),
-    linear-gradient(180deg, #fcf8ef 0%, #efe3ce 100%);
+  background: #f4f6fb;
   color: var(--color-ink);
 }
 
 body {
   font-family: var(--font-display), "Segoe UI", sans-serif;
+  background-image:
+    radial-gradient(circle at 50% -20%, rgba(104, 89, 217, 0.13), transparent 38%),
+    radial-gradient(circle at 100% 100%, rgba(56, 189, 248, 0.09), transparent 28%);
+}
+
+body::before {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  content: "";
+  pointer-events: none;
+  opacity: 0.22;
+  background-image: linear-gradient(rgba(24,32,51,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(24,32,51,.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, black, transparent 78%);
 }
 
 button,
 input,
 textarea {
   font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--color-ocean);
+  outline-offset: 2px;
 }
 
 a {
@@ -46,9 +72,14 @@ a {
 
 .panel {
   background: var(--color-frost);
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(20px);
   border: 1px solid var(--color-line);
-  box-shadow: 0 16px 60px rgba(8, 35, 44, 0.18);
+  box-shadow: 0 14px 40px rgba(47, 54, 79, 0.09);
+}
+
+.subtle-panel {
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid var(--color-line);
 }
 
 .mono {
@@ -56,27 +87,35 @@ a {
 }
 
 .markdown {
-  font-size: 0.96rem;
-  line-height: 1.7;
+  font-size: 0.95rem;
+  line-height: 1.75;
+  color: #354052;
 }
 
-.markdown p {
-  margin: 0 0 0.8rem;
-}
-
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 0 0 0.85rem; }
+.markdown h1, .markdown h2, .markdown h3 { color: #182033; font-weight: 600; line-height: 1.35; margin: 1.4rem 0 0.7rem; }
+.markdown h1 { font-size: 1.35rem; }
+.markdown h2 { font-size: 1.16rem; }
+.markdown h3 { font-size: 1rem; }
 .markdown pre {
   overflow-x: auto;
-  border-radius: 18px;
-  background: rgba(13, 37, 48, 0.9);
-  color: #f8f6ee;
+  border: 1px solid rgba(24,32,51,.1);
+  border-radius: 14px;
+  background: #20263a;
+  color: #eef1f7;
   padding: 1rem;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
 }
+.markdown code { font-family: var(--font-mono), monospace; font-size: .88em; }
+.markdown :not(pre) > code { border: 1px solid rgba(104,89,217,.16); border-radius: 6px; background: rgba(104,89,217,.07); color: #594bc4; padding: .12rem .35rem; }
+.markdown ul, .markdown ol { padding-left: 1.25rem; margin: .7rem 0; }
+.markdown li { margin: .25rem 0; }
+.markdown a { color: #5f50ce; text-decoration: underline; text-underline-offset: 3px; }
+.markdown blockquote { margin: 1rem 0; border-left: 3px solid var(--color-ocean); padding-left: 1rem; color: var(--color-ink-soft); }
 
-.markdown code {
-  font-family: var(--font-mono), monospace;
-}
-
-.markdown ul,
-.markdown ol {
-  padding-left: 1.2rem;
+@media (max-width: 767px) {
+  body::before { display: none; }
+  .panel { backdrop-filter: blur(14px); }
 }

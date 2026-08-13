@@ -1,96 +1,41 @@
 "use client";
 
 import { MessageSquare, Plus, Trash2 } from "lucide-react";
-
 import { useAppStore } from "@/lib/store";
 
-function preview(text: string) {
-  return text.length > 72 ? `${text.slice(0, 72)}...` : text;
+function formatTime(timestamp: number) {
+  const date = new Date(timestamp * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
-export function Sidebar() {
-  const {
-    sessions,
-    currentSessionId,
-    selectSession,
-    createNewSession,
-    removeSession,
-    messages
-  } = useAppStore();
-
+export function Sidebar({ onSelect }: { onSelect?: () => void }) {
+  const { sessions, currentSessionId, selectSession, createNewSession, removeSession } = useAppStore();
   return (
-    <aside className="panel flex h-full flex-col rounded-[30px] p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-[0.28em] text-[var(--color-ink-soft)]">
-            Sessions
-          </p>
-          <h2 className="text-lg font-semibold tracking-[-0.04em]">会话与原始消息</h2>
-        </div>
-        <button
-          className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[rgba(15,139,141,0.12)] text-ocean"
-          onClick={() => void createNewSession()}
-          type="button"
-        >
-          <Plus size={18} />
-        </button>
+    <aside className="panel flex h-full flex-col rounded-2xl p-3">
+      <div className="flex items-center justify-between px-1 pb-3 pt-1">
+        <div><p className="text-[10px] font-medium uppercase tracking-[0.22em] text-[var(--color-ink-soft)]">Workspace</p><h2 className="mt-1 text-sm font-semibold text-slate-900">最近会话</h2></div>
+        <button className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-ocean-soft)] text-[#6859d9] transition hover:bg-violet-100" onClick={() => void createNewSession()} aria-label="新建会话" type="button"><Plus size={16} /></button>
       </div>
-
-      <div className="space-y-2 overflow-y-auto pr-1">
-        {sessions.map((session) => (
-          <div
-            className={`rounded-3xl border px-4 py-3 transition ${
-              session.id === currentSessionId
-                ? "border-transparent bg-[rgba(15,139,141,0.16)]"
-                : "border-[var(--color-line)] bg-white/45"
-            }`}
-            key={session.id}
-          >
-            <button
-              className="w-full text-left"
-              onClick={() => void selectSession(session.id)}
-              type="button"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="font-medium">{session.title}</p>
-                  <p className="mt-1 text-xs text-[var(--color-ink-soft)]">
-                    {session.message_count} 条消息
-                  </p>
+      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+        {sessions.map((session) => {
+          const active = session.id === currentSessionId;
+          return (
+            <div className={`group relative rounded-xl border transition ${active ? "border-violet-200 bg-violet-50" : "border-transparent hover:border-slate-200 hover:bg-slate-50"}`} key={session.id}>
+              <button className="w-full px-3 py-3 text-left" onClick={() => { void selectSession(session.id); onSelect?.(); }} type="button">
+                <div className="flex items-start gap-2.5">
+                  <MessageSquare className={active ? "mt-0.5 shrink-0 text-[#6859d9]" : "mt-0.5 shrink-0 text-slate-400"} size={15} />
+                  <div className="min-w-0 flex-1"><p className={`truncate text-sm ${active ? "font-medium text-slate-900" : "text-slate-600"}`}>{session.title}</p><p className="mt-1 text-[11px] text-slate-400">{session.message_count} 条消息 · {formatTime(session.updated_at)}</p></div>
                 </div>
-                <MessageSquare className="mt-1 text-[var(--color-ink-soft)]" size={16} />
-              </div>
-            </button>
-            <button
-              className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ember)]"
-              onClick={() => void removeSession(session.id)}
-              type="button"
-            >
-              <Trash2 size={14} />
-              删除
-            </button>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-4 flex min-h-0 flex-1 flex-col rounded-[24px] border border-[var(--color-line)] bg-white/40 p-3">
-        <p className="text-xs uppercase tracking-[0.28em] text-[var(--color-ink-soft)]">
-          Raw Messages
-        </p>
-        <div className="mt-3 space-y-3 overflow-y-auto pr-1">
-          {messages.map((message) => (
-            <div
-              className="rounded-2xl border border-[var(--color-line)] bg-white/60 px-3 py-2"
-              key={message.id}
-            >
-              <div className="mb-1 flex items-center justify-between text-xs uppercase tracking-[0.2em] text-[var(--color-ink-soft)]">
-                <span>{message.role}</span>
-                <span>{message.toolCalls.length} tools</span>
-              </div>
-              <p className="text-sm text-[var(--color-ink-soft)]">{preview(message.content)}</p>
+              </button>
+              <button className="absolute right-2 top-2.5 flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 opacity-0 transition hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 focus:opacity-100" onClick={(event) => { event.stopPropagation(); if (window.confirm(`确定删除“${session.title}”吗？`)) void removeSession(session.id); }} aria-label={`删除会话 ${session.title}`} type="button"><Trash2 size={14} /></button>
             </div>
-          ))}
-        </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-3">
+        <div className="flex items-center justify-between text-[11px] text-[var(--color-ink-soft)]"><span>本地会话</span><span className="text-[var(--color-success)]">● 已同步</span></div>
+        <p className="mt-1.5 text-[11px] leading-5 text-slate-400">对话记录保存在本机，不同会话彼此隔离。</p>
       </div>
     </aside>
   );

@@ -1,42 +1,23 @@
 "use client";
 
-import { TerminalSquare } from "lucide-react";
-
+import { Check, ChevronRight, TerminalSquare } from "lucide-react";
 import type { ToolCall } from "@/lib/api";
 
 export function ThoughtChain({ toolCalls }: { toolCalls: ToolCall[] }) {
-  if (!toolCalls.length) {
-    return null;
-  }
-
-  const toolNames = Array.from(new Set(toolCalls.map(tc => tc.tool))).join(", ");
-
+  if (!toolCalls.length) return null;
+  const toolNames = Array.from(new Set(toolCalls.map((call) => call.tool))).join(" · ");
   return (
-    <details className="mb-4 rounded-3xl border border-[rgba(212,106,74,0.18)] bg-[rgba(212,106,74,0.08)] p-4">
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[var(--color-ember)] outline-none">
-        <TerminalSquare size={16} />
-        <span>工具调用 {toolCalls.length} 次</span>
-        {toolNames && <span className="text-[11px] opacity-70 font-normal ml-1">({toolNames})</span>}
+    <details className="group mb-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-50/80">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-xs text-slate-500 outline-none hover:bg-slate-100/70">
+        <ChevronRight className="transition group-open:rotate-90" size={14} /><TerminalSquare className="text-[var(--color-ember)]" size={15} /><span>已执行 {toolCalls.length} 次工具调用</span><span className="min-w-0 truncate text-slate-400">{toolNames}</span>
       </summary>
-      <div className="mt-3 space-y-3">
+      <div className="space-y-2 border-t border-slate-200 p-2">
         {toolCalls.map((toolCall, index) => (
-          <div className="rounded-2xl bg-white/70 p-3" key={`${toolCall.tool}-${index}`}>
-            <div className="mb-2 text-sm font-medium">
-              {toolCall.tool}
-            </div>
-            <div className="space-y-2 text-xs">
-              {toolCall.input && (
-                <div className="rounded-2xl bg-[rgba(13,37,48,0.06)] p-3">
-                  <div className="mb-1 font-medium text-[var(--color-ink-soft)]">Input</div>
-                  <pre className="mono whitespace-pre-wrap break-all">{toolCall.input}</pre>
-                </div>
-              )}
-              {toolCall.output && (
-                <div className="rounded-2xl bg-[rgba(13,37,48,0.06)] p-3">
-                  <div className="mb-1 font-medium text-[var(--color-ink-soft)]">Output</div>
-                  <div className="mono whitespace-pre-wrap break-all max-h-60 overflow-y-auto">{toolCall.output}</div>
-                </div>
-              )}
+          <div className="rounded-lg border border-slate-200 bg-white p-3" key={`${toolCall.tool}-${index}`}>
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-700"><span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-50 text-emerald-600"><Check size={10} /></span>{toolCall.tool}</div>
+            <div className="space-y-2 text-[11px]">
+              {toolCall.input && <div><div className="mb-1 text-slate-400">输入</div><pre className="mono max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-50 p-2.5 text-slate-600">{toolCall.input}</pre></div>}
+              {toolCall.output && <div><div className="mb-1 text-slate-400">输出</div><div className="mono max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-50 p-2.5 text-slate-600">{toolCall.output}</div></div>}
             </div>
           </div>
         ))}

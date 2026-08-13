@@ -10,15 +10,15 @@ function Workspace() {
   const { sidebarWidth, setSidebarWidth } = useAppStore();
 
   return (
-    <main className="h-screen p-4 md:p-6 flex flex-col">
-      <div className="mx-auto flex w-full max-w-[1800px] flex-1 flex-col gap-4 min-h-0">
+    <main className="flex h-screen flex-col overflow-hidden px-3 py-3 sm:px-4 sm:py-4 lg:px-6">
+      <div className="mx-auto flex min-h-0 w-full max-w-[1720px] flex-1 flex-col gap-3 lg:gap-4">
         <Navbar />
-        <div className="flex flex-1 gap-0 min-h-0">
-          <div style={{ width: sidebarWidth, flexShrink: 0 }} className="h-full">
+        <div className="flex min-h-0 flex-1 gap-0">
+          <div style={{ width: sidebarWidth, flexShrink: 0 }} className="hidden h-full md:block">
             <Sidebar />
           </div>
-          <ResizeHandle onResize={(delta) => setSidebarWidth(Math.max(260, sidebarWidth + delta))} />
-          <div className="flex-1 min-w-0 h-full">
+          <ResizeHandle onResize={(delta) => setSidebarWidth(Math.min(440, Math.max(260, sidebarWidth + delta)))} />
+          <div className="h-full min-w-0 flex-1">
             <ChatPanel />
           </div>
         </div>
@@ -28,9 +28,5 @@ function Workspace() {
 }
 
 export default function Page() {
-  return (
-    <AppProvider>
-      <Workspace />
-    </AppProvider>
-  );
+  return <AppProvider><Workspace /></AppProvider>;
 }
