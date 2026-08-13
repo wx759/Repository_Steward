@@ -58,13 +58,35 @@ const StoreContext = createContext<AppStore | null>(null);
 const makeId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 function toUiMessages(history: Awaited<ReturnType<typeof getSessionHistory>>["messages"]): Message[] {
-  return history.map((message) => ({
-    id: makeId(),
-    role: message.role,
-    content: message.content ?? "",
-    toolCalls: message.tool_calls ?? [],
-    status: message.status
-  }));
+  const messages: Message[] = [];
+
+  for (const item of history) {
+    const next: Message = {
+      id: makeId(),
+      role: item.role,
+      content: item.content ?? "",
+      toolCalls: item.tool_calls ?? [],
+      status: item.status
+    };
+    const previous = messages.at(-1);
+
+    // A single agent turn can contain many internal AI/tool records. Present
+    // them as one assistant response instead of one card per tool round-trip.
+    if (next.role === "assistant" && previous?.role === "assistant") {
+      previous.toolCalls.push(...next.toolCalls);
+      if (next.content.trim()) {
+        previous.content = previous.content.trim()
+          ? `${previous.content}\n\n${next.content}`
+          : next.content;
+      }
+      previous.status = next.status ?? previous.status;
+      continue;
+    }
+
+    messages.push(next);
+  }
+
+  return messages;
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -128,7 +150,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setMessages((previous) => [...previous, userMessage, assistantMessage]);
     setIsStreaming(true);
 
-    let activeAssistantId = assistantMessage.id;
+    const activeAssistantId = assistantMessage.id;
     const patchAssistant = (update: (message: Message) => Message) => {
       setMessages((previous) =>
         previous.map((message) => message.id === activeAssistantId ? update(message) : message)
@@ -167,9 +189,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
               )
             }));
           } else if (event === "new_response") {
-            const next: Message = { id: makeId(), role: "assistant", content: "", toolCalls: [] };
-            activeAssistantId = next.id;
-            setMessages((previous) => [...previous, next]);
+            // Keep all internal tool rounds inside the current assistant turn.
+            // The UI exposes only one compact working state and the final answer.
+            return;
           } else if (event === "done") {
             patchAssistant((message) => ({
               ...message,

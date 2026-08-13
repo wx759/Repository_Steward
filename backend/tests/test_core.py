@@ -101,6 +101,8 @@ def test_session_round_trips_standard_tool_messages_and_projects_ui_history(
         },
         {"role": "assistant", "content": "README loaded"},
     ]
+    summaries = manager.list_sessions()
+    assert summaries[0]["message_count"] == 2
 
 
 def test_session_preserves_incomplete_ai_recovery_status(tmp_path: Path) -> None:

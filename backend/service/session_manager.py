@@ -72,6 +72,19 @@ class SessionManager:
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _visible_message_count(records: list[dict[str, Any]]) -> int:
+        """Count chat bubbles, not internal AI/tool protocol records."""
+        count = 0
+        previous_role: str | None = None
+        for message in records_to_display_messages(records):
+            role = str(message.get("role") or "")
+            if role == "assistant" and previous_role == "assistant":
+                continue
+            count += 1
+            previous_role = role
+        return count
+
     def create_session(self, title: str = "新会话") -> dict[str, Any]:
         record = self._default_record(uuid.uuid4().hex, title=title)
         self._write_session(record)
@@ -90,8 +103,8 @@ class SessionManager:
                     "title": record.get("title", "新会话"),
                     "created_at": record.get("created_at"),
                     "updated_at": record.get("updated_at"),
-                    "message_count": len(
-                        records_to_display_messages(record.get("messages", []))
+                    "message_count": self._visible_message_count(
+                        record.get("messages", [])
                     ),
                 }
             )

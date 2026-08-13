@@ -25,3 +25,4 @@ frontend/.npm-cache/
 .DS_Store
 Thumbs.db
 sessions/
+.repository_steward/
