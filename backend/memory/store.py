@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import Sequence, cast
 from uuid import uuid4
 
-from .models import MEMORY_TYPES, MemoryDraft, MemoryMetadata, MemoryRecord, MemoryType
+from .models import (
+    MEMORY_STATUSES,
+    MEMORY_TYPES,
+    MemoryDraft,
+    MemoryMetadata,
+    MemoryRecord,
+    MemoryStatus,
+    MemoryType,
+)
 
 
 def _utc_now() -> str:
@@ -31,25 +39,50 @@ class MemoryStore:
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memories (
                     id          TEXT PRIMARY KEY,
                     name        TEXT NOT NULL,
                     type        TEXT NOT NULL CHECK (
                                     type IN ('user', 'project', 'feedback', 'reference')
-                                ),
+                    ),
                     description TEXT NOT NULL,
                     body        TEXT NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'active' CHECK (
+                                    status IN ('active', 'superseded', 'archived')
+                                ),
                     created_at  TEXT NOT NULL,
                     updated_at  TEXT NOT NULL
-                );
+                )
+                """
+            )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(memories)").fetchall()
+            }
+            if "status" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE memories
+                    ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK (
+                        status IN ('active', 'superseded', 'archived')
+                    )
+                    """
+                )
+            connection.executescript(
+                """
+                DROP INDEX IF EXISTS ux_memories_name_nocase;
 
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_memories_name_nocase
-                ON memories(name COLLATE NOCASE);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_memories_active_name_nocase
+                ON memories(name COLLATE NOCASE)
+                WHERE status = 'active';
 
                 CREATE INDEX IF NOT EXISTS ix_memories_updated_at
                 ON memories(updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS ix_memories_status_updated_at
+                ON memories(status, updated_at DESC);
                 """
             )
 
@@ -77,6 +110,7 @@ class MemoryStore:
             name=str(row["name"]),
             type=cast(MemoryType, str(row["type"])),
             description=str(row["description"]),
+            status=cast(MemoryStatus, str(row["status"])),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
@@ -89,19 +123,30 @@ class MemoryStore:
             name=metadata.name,
             type=metadata.type,
             description=metadata.description,
+            status=metadata.status,
             created_at=metadata.created_at,
             updated_at=metadata.updated_at,
             body=str(row["body"]),
         )
 
-    def list_metadata(self) -> list[MemoryMetadata]:
+    def list_metadata(
+        self,
+        *,
+        status: MemoryStatus | None = "active",
+    ) -> list[MemoryMetadata]:
+        if status is not None and status not in MEMORY_STATUSES:
+            raise ValueError(f"Unsupported memory status: {status}")
+        where_clause = "WHERE status = ?" if status is not None else ""
+        parameters = (status,) if status is not None else ()
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT id, name, type, description, created_at, updated_at
+                f"""
+                SELECT id, name, type, description, status, created_at, updated_at
                 FROM memories
+                {where_clause}
                 ORDER BY updated_at DESC, name COLLATE NOCASE ASC
-                """
+                """,
+                parameters,
             ).fetchall()
         return [self._metadata_from_row(row) for row in rows]
 
@@ -112,7 +157,10 @@ class MemoryStore:
         placeholders = ",".join("?" for _ in ordered_ids)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM memories WHERE id IN ({placeholders})",
+                f"""
+                SELECT * FROM memories
+                WHERE id IN ({placeholders}) AND status = 'active'
+                """,
                 ordered_ids,
             ).fetchall()
         records = {str(row["id"]): self._record_from_row(row) for row in rows}
@@ -128,8 +176,8 @@ class MemoryStore:
                 connection.execute(
                     """
                     INSERT INTO memories (
-                        id, name, type, description, body, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        id, name, type, description, body, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
                     """,
                     (
                         memory_id,
@@ -149,6 +197,7 @@ class MemoryStore:
             name=cleaned.name,
             type=cleaned.type,
             description=cleaned.description,
+            status="active",
             body=cleaned.body,
             created_at=now,
             updated_at=now,
@@ -161,7 +210,7 @@ class MemoryStore:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute(
-                    "SELECT created_at FROM memories WHERE id = ?",
+                    "SELECT created_at, status FROM memories WHERE id = ?",
                     (memory_id,),
                 ).fetchone()
                 if existing is None:
@@ -189,10 +238,81 @@ class MemoryStore:
             name=cleaned.name,
             type=cleaned.type,
             description=cleaned.description,
+            status=cast(MemoryStatus, str(existing["status"])),
             body=cleaned.body,
             created_at=str(existing["created_at"]),
             updated_at=now,
         )
+
+    def supersede_memory(
+        self,
+        memory_id: str,
+        replacement: MemoryDraft,
+    ) -> MemoryRecord:
+        """Deactivate one active memory and insert its active replacement atomically."""
+        cleaned = self._clean_draft(replacement)
+        replacement_id = uuid4().hex
+        now = _utc_now()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE memories
+                    SET status = 'superseded', updated_at = ?
+                    WHERE id = ? AND status = 'active'
+                    """,
+                    (now, memory_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(f"Active memory not found: {memory_id}")
+                connection.execute(
+                    """
+                    INSERT INTO memories (
+                        id, name, type, description, body, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                    """,
+                    (
+                        replacement_id,
+                        cleaned.name,
+                        cleaned.type,
+                        cleaned.description,
+                        cleaned.body,
+                        now,
+                        now,
+                    ),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                f"Active memory name already exists: {cleaned.name}"
+            ) from exc
+        return MemoryRecord(
+            id=replacement_id,
+            name=cleaned.name,
+            type=cleaned.type,
+            description=cleaned.description,
+            status="active",
+            body=cleaned.body,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def archive_memory(self, memory_id: str) -> bool:
+        """Stop recalling an active memory without deleting its stored content."""
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE memories
+                SET status = 'archived', updated_at = ?
+                WHERE id = ? AND status = 'active'
+                """,
+                (now, memory_id),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
 
     def delete_memory(self, memory_id: str) -> bool:
         with self._connect() as connection:

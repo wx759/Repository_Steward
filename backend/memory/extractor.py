@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, cast
+from dataclasses import dataclass, field
+from typing import Any, Literal, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
@@ -19,6 +19,19 @@ class ExtractionResult:
     candidates: int
     saved: list[MemoryRecord]
     failure_reason: str | None = None
+    superseded: list[str] = field(default_factory=list)
+    archived: list[str] = field(default_factory=list)
+
+
+MemoryAction = Literal["create", "supersede", "archive"]
+
+
+@dataclass(frozen=True)
+class MemoryOperation:
+    action: MemoryAction
+    evidence_quote: str
+    target_id: str | None = None
+    draft: MemoryDraft | None = None
 
 
 def _message_text(content: Any) -> str:
@@ -132,6 +145,11 @@ class MemoryExtractor:
     async def extract_and_save(self, messages: list[AnyMessage]) -> ExtractionResult:
         catalog = await asyncio.to_thread(self.store.list_metadata)
         snapshot = format_turn_snapshot(messages, max_chars=self.input_chars)
+        user_text = "\n".join(
+            _message_text(message.content)
+            for message in messages
+            if isinstance(message, HumanMessage)
+        )
         if not snapshot:
             return ExtractionResult(0, [])
         try:
@@ -154,31 +172,93 @@ class MemoryExtractor:
                 ),
                 timeout=self.timeout_seconds,
             )
-            drafts = self._parse_drafts(_message_text(getattr(response, "content", "")))
+            operations = self._parse_operations(
+                _message_text(getattr(response, "content", "")),
+                catalog,
+                user_text,
+            )
         except Exception as exc:
             return ExtractionResult(0, [], failure_reason=type(exc).__name__)
 
         saved: list[MemoryRecord] = []
+        superseded: list[str] = []
+        archived: list[str] = []
         current_catalog = list(catalog)
-        for draft in drafts:
-            if _contains_secret(draft) or _is_duplicate(draft, current_catalog):
-                continue
+        for operation in operations:
             try:
-                record = await asyncio.to_thread(self.store.save_memory, draft)
+                if operation.action == "archive":
+                    target_id = cast(str, operation.target_id)
+                    if await asyncio.to_thread(self.store.archive_memory, target_id):
+                        archived.append(target_id)
+                        current_catalog = [
+                            item for item in current_catalog if item.id != target_id
+                        ]
+                    continue
+
+                draft = cast(MemoryDraft, operation.draft)
+                if _contains_secret(draft):
+                    continue
+                if operation.action == "create":
+                    if _is_duplicate(draft, current_catalog):
+                        continue
+                    record = await asyncio.to_thread(self.store.save_memory, draft)
+                else:
+                    target_id = cast(str, operation.target_id)
+                    record = await asyncio.to_thread(
+                        self.store.supersede_memory,
+                        target_id,
+                        draft,
+                    )
+                    superseded.append(target_id)
+                    current_catalog = [
+                        item for item in current_catalog if item.id != target_id
+                    ]
             except ValueError:
                 continue
             saved.append(record)
             current_catalog.append(record)
-        return ExtractionResult(len(drafts), saved)
+        return ExtractionResult(
+            len(operations),
+            saved,
+            superseded=superseded,
+            archived=archived,
+        )
 
-    def _parse_drafts(self, raw: str) -> list[MemoryDraft]:
+    def _parse_operations(
+        self,
+        raw: str,
+        catalog: list[MemoryMetadata],
+        user_text: str,
+    ) -> list[MemoryOperation]:
         payload = json.loads(raw)
         if not isinstance(payload, list) or len(payload) > self.max_items:
             raise ValueError("Extractor response must be a bounded JSON array")
-        drafts: list[MemoryDraft] = []
+        allowed_ids = {memory.id for memory in catalog}
+        operations: list[MemoryOperation] = []
         for item in payload:
             if not isinstance(item, dict):
                 raise ValueError("Extractor item must be an object")
+            action = str(item.get("action", "")).strip().lower()
+            evidence_quote = str(item.get("evidence_quote", "")).strip()
+            target_id = str(item.get("target_id", "")).strip() or None
+            if action not in {"create", "supersede", "archive"}:
+                raise ValueError("Extractor returned an unsupported action")
+            if not evidence_quote or evidence_quote not in user_text:
+                raise ValueError("Extractor evidence is not present in the user message")
+            if action == "create" and target_id is not None:
+                raise ValueError("Create must not target an existing memory")
+            if action in {"supersede", "archive"} and target_id not in allowed_ids:
+                raise ValueError("Extractor targeted an unknown active memory")
+            if action == "archive":
+                operations.append(
+                    MemoryOperation(
+                        action="archive",
+                        evidence_quote=evidence_quote,
+                        target_id=target_id,
+                    )
+                )
+                continue
+
             name = str(item.get("name", "")).strip()
             memory_type = str(item.get("type", "")).strip().lower()
             description = str(item.get("description", "")).strip()
@@ -189,12 +269,17 @@ class MemoryExtractor:
                 raise ValueError("Extractor returned an empty field")
             if len(name) > 120 or len(description) > 500 or len(body) > 4_000:
                 raise ValueError("Extractor returned an oversized field")
-            drafts.append(
-                MemoryDraft(
-                    name=name,
-                    type=cast(MemoryType, memory_type),
-                    description=description,
-                    body=body,
+            operations.append(
+                MemoryOperation(
+                    action=cast(MemoryAction, action),
+                    evidence_quote=evidence_quote,
+                    target_id=target_id,
+                    draft=MemoryDraft(
+                        name=name,
+                        type=cast(MemoryType, memory_type),
+                        description=description,
+                        body=body,
+                    ),
                 )
             )
-        return drafts
+        return operations

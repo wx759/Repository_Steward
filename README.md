@@ -77,18 +77,19 @@ persisted messages.
 
 ## Long-term Memory
 
-Before each main Agent run, a side-model sees only the current request and the Memory
-catalog (`id + name + description`) and returns at most five ids. The selected bodies are
+Before each main Agent run, a side-model sees only the current request and the active Memory
+catalog (`id + name + description + status`) and returns at most five ids. The selected bodies are
 loaded from `backend/memory.sqlite` and appended only to that run's model system prompt.
 They are not added to graph messages, Session JSON, or the LangGraph checkpoint. If the
 selection call fails, a local keyword matcher is used instead.
 
-After a completed main Agent turn, another isolated side-model extracts only stable user
-preferences, long-term project facts, durable Agent feedback, and important references from
-the pre-compaction turn snapshot. Temporary task details and secrets are rejected. Extractor
+After a completed main Agent turn, another isolated side-model may create, supersede, or archive
+Memory only from an explicit lasting statement in the user's original text. Every operation must
+quote that user evidence exactly; supersede/archive must also target the id of an existing active
+record. Superseded and archived records remain in SQLite for history but are excluded from normal
+selection and loading. Temporary task details, inferred facts, and secrets are rejected. Extractor
 failure never changes an already completed main answer. The feature and its limits use the
-`MEMORY_*` settings in `backend/config/.env.example`; set `MEMORY_ENABLED=false` to disable
-all select/load/extract/save work.
+`MEMORY_*` settings in `backend/config/.env.example`; set `MEMORY_ENABLED=false` to disable it.
 
 ## Context compaction
 

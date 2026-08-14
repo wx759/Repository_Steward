@@ -267,9 +267,11 @@ class AgentManager:
         try:
             result = await self.memory_extractor.extract_and_save(messages)
             logger.info(
-                "memory extractor candidates=%s saved=%s failure=%s",
+                "memory extractor candidates=%s saved=%s superseded=%s archived=%s failure=%s",
                 result.candidates,
                 len(result.saved),
+                len(result.superseded),
+                len(result.archived),
                 result.failure_reason,
             )
         except Exception as exc:

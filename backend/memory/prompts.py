@@ -13,13 +13,21 @@ Return at most {limit} ids. Never return names, explanations, or markdown.
 Every returned id must exist in the supplied catalog."""
 
 
-EXTRACTOR_SYSTEM_PROMPT = """Extract durable cross-session memories from one completed agent turn.
-Return only a JSON array. Each item must contain name, type, description, and body.
-Allowed types: user, project, feedback, reference.
-Save only stable user preferences, long-term project facts, durable feedback about the agent,
-or important references. Do not save temporary task details, completed-task logs, transient errors,
-tool output dumps, secrets, guesses, or facts already covered by the existing catalog.
-Return at most {limit} items. Return [] when nothing is worth saving."""
+EXTRACTOR_SYSTEM_PROMPT = """Manage durable cross-session memories from one completed agent turn.
+Return only a JSON array with at most {limit} operations. Return [] unless the user explicitly
+states a lasting preference, instruction, correction, or request to stop using a memory.
+
+Every operation must include an evidence_quote copied exactly from a USER message.
+- create: include action, evidence_quote, name, type, description, and body.
+- supersede: include those fields plus target_id from the active catalog. Use this only when the
+  user explicitly replaces or corrects that specific active memory.
+- archive: include action, evidence_quote, and target_id. Use this only when the user explicitly
+  stops using that active memory without providing a replacement.
+
+Allowed types: user, project, feedback, reference. Never infer a lasting memory from assistant
+text, tool output, code inspection, or temporary task details. Do not save completed-task logs,
+transient errors, secrets, guesses, or facts already covered by the active catalog. When the
+replacement or target is uncertain, return no operation for it."""
 
 
 def format_catalog(catalog: list[MemoryMetadata], *, include_type: bool = False) -> str:
@@ -31,6 +39,7 @@ def format_catalog(catalog: list[MemoryMetadata], *, include_type: bool = False)
             "id": item.id,
             "name": item.name,
             "description": item.description,
+            "status": item.status,
         }
         if include_type:
             record["type"] = item.type

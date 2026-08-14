@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +53,7 @@ def test_memory_store_crud_and_ordered_loading(tmp_path: Path) -> None:
     )
 
     assert {item.id for item in store.list_metadata()} == {first.id, second.id}
+    assert {item.status for item in store.list_metadata()} == {"active"}
     assert [item.id for item in store.get_memories([second.id, "missing", first.id])] == [
         second.id,
         first.id,
@@ -85,6 +87,67 @@ def test_memory_store_crud_and_ordered_loading(tmp_path: Path) -> None:
 
     assert store.delete_memory(second.id) is True
     assert store.delete_memory(second.id) is False
+
+
+def test_memory_store_migrates_existing_rows_to_active(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy-memory.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX ux_memories_name_nocase
+            ON memories(name COLLATE NOCASE);
+            INSERT INTO memories VALUES (
+                'legacy-1', 'legacy', 'project', 'old row', 'old body',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+            );
+            """
+        )
+
+    store = MemoryStore(database_path)
+
+    assert store.list_metadata()[0].status == "active"
+
+
+def test_superseded_and_archived_memories_are_not_recalled(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.sqlite")
+    old = store.save_memory(
+        MemoryDraft(
+            name="prefer-powershell",
+            type="user",
+            description="User prefers PowerShell.",
+            body="Use PowerShell.",
+        )
+    )
+    replacement = store.supersede_memory(
+        old.id,
+        MemoryDraft(
+            name="prefer-bash",
+            type="user",
+            description="User now prefers Bash.",
+            body="Use Bash.",
+        ),
+    )
+
+    assert [item.id for item in store.list_metadata()] == [replacement.id]
+    assert store.get_memories([old.id, replacement.id]) == [replacement]
+    statuses = {item.id: item.status for item in store.list_metadata(status=None)}
+    assert statuses == {old.id: "superseded", replacement.id: "active"}
+
+    assert store.archive_memory(replacement.id) is True
+    assert store.archive_memory(replacement.id) is False
+    assert store.list_metadata() == []
+    assert store.get_memories([replacement.id]) == []
+    statuses = {item.id: item.status for item in store.list_metadata(status=None)}
+    assert statuses == {old.id: "superseded", replacement.id: "archived"}
 
 
 def test_selector_returns_only_catalog_ids_and_falls_back_to_keywords(
@@ -141,16 +204,20 @@ def test_extractor_saves_new_memory_but_skips_duplicates_and_secrets(
     )
     response = """[
       {
+        "action": "create",
         "name": "prefer-light-ui",
         "type": "user",
         "description": "User prefers a light UI theme.",
-        "body": "Use a restrained light color palette for future UI work."
+        "body": "Use a restrained light color palette for future UI work.",
+        "evidence_quote": "以后前端都使用浅色主题"
       },
       {
+        "action": "create",
         "name": "api-secret",
         "type": "reference",
         "description": "API key",
-        "body": "api_key=sk-abcdefghijklmnop"
+        "body": "api_key=sk-abcdefghijklmnop",
+        "evidence_quote": "以后前端都使用浅色主题"
       }
     ]"""
     extractor = MemoryExtractor(
@@ -173,6 +240,97 @@ def test_extractor_saves_new_memory_but_skips_duplicates_and_secrets(
         "existing-project-fact",
         "prefer-light-ui",
     }
+
+
+def test_extractor_supersedes_only_a_targeted_active_memory(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.sqlite")
+    old = store.save_memory(
+        MemoryDraft(
+            name="prefer-powershell",
+            type="user",
+            description="User prefers PowerShell commands.",
+            body="Use PowerShell commands.",
+        )
+    )
+    response = f"""[
+      {{
+        "action": "supersede",
+        "target_id": "{old.id}",
+        "name": "prefer-bash",
+        "type": "user",
+        "description": "User explicitly changed the shell preference to Bash.",
+        "body": "Use Bash commands instead of PowerShell.",
+        "evidence_quote": "以后不要用 PowerShell，改用 Bash"
+      }}
+    ]"""
+    extractor = MemoryExtractor(store, FakeListChatModel(responses=[response]))
+
+    result = asyncio.run(
+        extractor.extract_and_save(
+            [HumanMessage(content="以后不要用 PowerShell，改用 Bash")]
+        )
+    )
+
+    assert result.superseded == [old.id]
+    assert [item.name for item in result.saved] == ["prefer-bash"]
+    assert [item.name for item in store.list_metadata()] == ["prefer-bash"]
+    assert {item.status for item in store.list_metadata(status=None)} == {
+        "active",
+        "superseded",
+    }
+
+
+def test_extractor_rejects_operation_without_exact_user_evidence(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.sqlite")
+    response = """[
+      {
+        "action": "create",
+        "name": "guessed-preference",
+        "type": "user",
+        "description": "A guessed preference.",
+        "body": "Use Bash.",
+        "evidence_quote": "用户明确要求以后使用 Bash"
+      }
+    ]"""
+    extractor = MemoryExtractor(store, FakeListChatModel(responses=[response]))
+
+    result = asyncio.run(
+        extractor.extract_and_save([HumanMessage(content="请帮我运行这个 Bash 命令")])
+    )
+
+    assert result.failure_reason == "ValueError"
+    assert store.list_metadata() == []
+
+
+def test_extractor_archives_only_a_targeted_active_memory(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.sqlite")
+    current = store.save_memory(
+        MemoryDraft(
+            name="answer-style",
+            type="user",
+            description="User prefers detailed answers.",
+            body="Give detailed answers.",
+        )
+    )
+    response = f"""[
+      {{
+        "action": "archive",
+        "target_id": "{current.id}",
+        "evidence_quote": "以后不再使用这个回答风格偏好"
+      }}
+    ]"""
+    extractor = MemoryExtractor(store, FakeListChatModel(responses=[response]))
+
+    result = asyncio.run(
+        extractor.extract_and_save(
+            [HumanMessage(content="以后不再使用这个回答风格偏好")]
+        )
+    )
+
+    assert result.archived == [current.id]
+    assert result.saved == []
+    assert store.list_metadata() == []
+    assert store.list_metadata(status=None)[0].status == "archived"
 
 
 def test_snapshot_keeps_user_request_and_final_answer_with_small_budget() -> None:

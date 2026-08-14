@@ -8,6 +8,10 @@ MemoryType = Literal["user", "project", "feedback", "reference"]
 MEMORY_TYPES: frozenset[str] = frozenset(
     {"user", "project", "feedback", "reference"}
 )
+MemoryStatus = Literal["active", "superseded", "archived"]
+MEMORY_STATUSES: frozenset[str] = frozenset(
+    {"active", "superseded", "archived"}
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,7 @@ class MemoryMetadata:
     name: str
     type: MemoryType
     description: str
+    status: MemoryStatus
     created_at: str
     updated_at: str
 

@@ -438,7 +438,10 @@ Extractor 只返回严格 JSON 数组：
 5. 与已有 `name + description` 做规范化精确/高重叠检查；
 6. `MemoryStore.save_memory()` 保存真正的新 Memory。
 
-第一版 Extractor 只新增，不自动更新或删除已有 Memory。`update_memory/delete_memory` 先作为 Store 完整能力和测试接口保留，避免无 consolidation 时让 LLM 擅自覆盖长期事实。
+后续状态扩展将 Memory 限定为 `active / superseded / archived`。Extractor 只有在输出可逐字
+回查到用户原文的 `evidence_quote` 时才执行操作：普通明确记忆创建为 `active`；用户明确
+替换某条现有 active Memory 时，将目标标为 `superseded` 并创建新 active；用户明确停用且
+没有替代内容时，将目标标为 `archived`。该流程不硬删除历史记录，也不处理模糊矛盾。
 
 ## 9. 与 `AgentManager` 的最小集成
 
@@ -757,7 +760,7 @@ done / Session JSON 按原逻辑保存
 
 - embedding、向量数据库或 BM25/RRF；
 - 自动 Memory consolidation/Dream；
-- LLM 自动更新或删除旧 Memory；
+- 基于模糊语义猜测自动更新或硬删除旧 Memory；
 - 多用户、组织或团队隔离；
 - 分布式锁和远程数据库；
 - Memory 管理 API/页面；
@@ -774,13 +777,13 @@ Session JSON、LangGraph Checkpointer、Context Compact 和 Error Recovery 边�
 
 已验证：
 
-- `MemoryStore` 的五个公开 API、大小写不敏感唯一约束和有序加载；
+- `MemoryStore` 的 CRUD、状态迁移、旧库自动补 `active` 和有序加载；
 - Selector 的严格 id 解析、最多五条限制和中英文关键词 fallback；
-- Extractor 的四类白名单、去重、字段边界和 secret filter；
+- Extractor 的显式用户证据校验、`create/supersede/archive`、四类白名单、去重、字段边界和 secret filter；
 - 长用户输入时仍保留用户请求与最终回答用于提取；
 - Memory 只修改本轮 model request，checkpoint 中不含注入正文；
 - AgentManager 按 `select -> load -> main agent -> extract -> save` 编排；
-- 现有后端测试与新增 Memory 测试共 37 项全部通过。
+- 现有后端测试与新增 Memory 测试共 42 项全部通过。
 
 真实供应商 LLM 的人工端到端验证仍需使用有效 API Key 启动服务后完成；该项不影响
 离线测试已经覆盖的存储、编排、失败隔离和持久化边界。
