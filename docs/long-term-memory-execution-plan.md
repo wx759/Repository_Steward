@@ -1,6 +1,6 @@
 # SQLite 长期 Memory：现状分析与执行计划
 
-> 状态：待确认，仅完成设计，尚未实现 Memory 代码  
+> 状态：已按计划实现并完成自动化回归（2026-08-14）
 > 参考：[wx759/learn-claude-code - s09_memory](https://github.com/wx759/learn-claude-code/tree/main/s09_memory)
 
 ## 1. 目标与边界
@@ -765,3 +765,22 @@ done / Session JSON 按原逻辑保存
 - 把 Memory 复制进每轮 conversation history。
 
 该边界保证第一版仍是一个可解释、可测试、可替换存储层的本地长期 Memory 模块，而不是重新引入此前被删除的复杂 Memory/RAG 子系统。
+
+## 18. 实施结果
+
+本计划已落地，实际新增 `backend/memory/` 领域包，并在 `AgentManager.astream()`
+的主 graph 前后分别加入 `select + load` 与 `extract + save`。实现保持了既有 SSE、
+Session JSON、LangGraph Checkpointer、Context Compact 和 Error Recovery 边界。
+
+已验证：
+
+- `MemoryStore` 的五个公开 API、大小写不敏感唯一约束和有序加载；
+- Selector 的严格 id 解析、最多五条限制和中英文关键词 fallback；
+- Extractor 的四类白名单、去重、字段边界和 secret filter；
+- 长用户输入时仍保留用户请求与最终回答用于提取；
+- Memory 只修改本轮 model request，checkpoint 中不含注入正文；
+- AgentManager 按 `select -> load -> main agent -> extract -> save` 编排；
+- 现有后端测试与新增 Memory 测试共 37 项全部通过。
+
+真实供应商 LLM 的人工端到端验证仍需使用有效 API Key 启动服务后完成；该项不影响
+离线测试已经覆盖的存储、编排、失败隔离和持久化边界。

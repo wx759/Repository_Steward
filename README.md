@@ -11,6 +11,7 @@ Repository Steward is a small coding-agent core derived from miniOpenClaw. It ke
 - JSON-backed sessions that provide persistent multi-turn context.
 - Four-layer context compaction before every agent model call.
 - Model error recovery with backoff, forced L4 retry, and output continuation.
+- SQLite-backed cross-session long-term Memory with isolated select/extract LLM calls.
 - File-based prompt components and a lightweight Skill scanner.
 - Next.js chat interface with session management, tool traces, and a prompt inspector.
 
@@ -27,6 +28,7 @@ backend/
 │   ├── agent.py
 │   ├── agent_factory.py
 │   └── llm.py
+├── memory/                 # SQLite store, selector, extractor, transient prompt middleware
 ├── service/
 │   ├── prompt_builder.py
 │   └── session_manager.py
@@ -37,6 +39,7 @@ backend/
 ├── skills/
 ├── workspace/
 ├── sessions/              # created at runtime
+├── memory.sqlite          # created at runtime
 └── app.py
 
 frontend/
@@ -51,16 +54,19 @@ POST /api/chat
   → restore the active Agent state from SQLite checkpoint
   → if no checkpoint exists, seed it once from the session JSON
   → append the current HumanMessage
+  → select and load up to five relevant long-term memories
   → LangChain create_agent
   → LLM ↔ tools
+  → extract durable facts from the completed raw turn
   → stream SSE events
   → checkpoint the active (possibly compacted) Agent state
   → append the complete turn to the session JSON archive
 ```
 
-The two persistent stores have separate jobs. Session JSON is the complete conversation
+The three persistent stores have separate jobs. Session JSON is the complete conversation
 archive used by the UI. `backend/checkpoints.sqlite` is the active Agent state used by
 LangGraph, so compacted context is reused on later turns and after API restarts.
+`backend/memory.sqlite` contains selected durable facts that can be reused across sessions.
 
 Session files use a small LangChain-aligned schema: `human`, `ai`, and `tool` records.
 Tool calls are linked to tool results with `id` / `tool_call_id`. The Session API projects
@@ -68,6 +74,21 @@ these records into the existing `user` / `assistant` UI shape. The records seed 
 checkpoint without dropping tool messages. Older UI-oriented session files are migrated when
 they are read. SSE events remain a transport-only format and are not used to rebuild
 persisted messages.
+
+## Long-term Memory
+
+Before each main Agent run, a side-model sees only the current request and the Memory
+catalog (`id + name + description`) and returns at most five ids. The selected bodies are
+loaded from `backend/memory.sqlite` and appended only to that run's model system prompt.
+They are not added to graph messages, Session JSON, or the LangGraph checkpoint. If the
+selection call fails, a local keyword matcher is used instead.
+
+After a completed main Agent turn, another isolated side-model extracts only stable user
+preferences, long-term project facts, durable Agent feedback, and important references from
+the pre-compaction turn snapshot. Temporary task details and secrets are rejected. Extractor
+failure never changes an already completed main answer. The feature and its limits use the
+`MEMORY_*` settings in `backend/config/.env.example`; set `MEMORY_ENABLED=false` to disable
+all select/load/extract/save work.
 
 ## Context compaction
 

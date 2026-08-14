@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -25,9 +27,19 @@ from middleware import (
     ErrorRecoveryMiddleware,
     RecoveryPolicy,
 )
+from memory import (
+    MemoryExtractor,
+    MemoryPromptMiddleware,
+    MemorySelector,
+    MemoryStore,
+    format_memory_context,
+)
 from service.context_manager import ContextManager, ContextPolicy
 from service.session_manager import SessionManager
 from tools import get_all_tools
+
+
+logger = logging.getLogger(__name__)
 
 
 def _stringify_content(content: Any) -> str:
@@ -51,7 +63,11 @@ class AgentManager:
         self._agent_graph_tools_id: int | None = None
         self.context_manager: ContextManager | None = None
         self._summary_model = None
+        self._side_model = None
         self.checkpointer: BaseCheckpointSaver | None = None
+        self.memory_store: MemoryStore | None = None
+        self.memory_selector: MemorySelector | None = None
+        self.memory_extractor: MemoryExtractor | None = None
 
     def initialize(
         self,
@@ -83,7 +99,26 @@ class AgentManager:
         )
         self._agent_graph = None
         self._summary_model = None
+        self._side_model = None
         self.checkpointer = checkpointer
+        self.memory_store = None
+        self.memory_selector = None
+        self.memory_extractor = None
+        if settings.memory_enabled:
+            self._side_model = self._build_chat_model()
+            self.memory_store = MemoryStore(base_dir / "memory.sqlite")
+            self.memory_selector = MemorySelector(
+                self._side_model,
+                max_items=settings.memory_selector_max_items,
+                timeout_seconds=settings.memory_side_call_timeout_seconds,
+            )
+            self.memory_extractor = MemoryExtractor(
+                self.memory_store,
+                self._side_model,
+                max_items=settings.memory_extract_max_items,
+                timeout_seconds=settings.memory_side_call_timeout_seconds,
+                input_chars=settings.memory_extract_input_chars,
+            )
 
     def _build_chat_model(self):
         settings = get_settings()
@@ -116,43 +151,50 @@ class AgentManager:
                     model=settings.llm_fallback_model,
                 )
                 fallback_model = get_llm(fallback_config)
+            middleware = [
+                ContextManagementMiddleware(
+                    self.context_manager,
+                    self._summary_model,
+                )
+            ]
+            if self.memory_selector is not None:
+                middleware.append(MemoryPromptMiddleware())
+            middleware.extend(
+                [
+                    ErrorRecoveryMiddleware(
+                        self.context_manager,
+                        self._summary_model,
+                        RecoveryPolicy(
+                            max_retries=settings.recovery_max_retries,
+                            initial_delay_seconds=(
+                                settings.recovery_initial_delay_ms / 1000
+                            ),
+                            max_delay_seconds=(
+                                settings.recovery_max_delay_ms / 1000
+                            ),
+                            max_continuations=settings.recovery_max_continuations,
+                            default_max_output_tokens=(
+                                settings.recovery_default_max_output_tokens
+                            ),
+                            escalated_max_output_tokens=(
+                                settings.recovery_escalated_max_output_tokens
+                            ),
+                        ),
+                        fallback_model=fallback_model,
+                    ),
+                    ToolErrorMiddleware(
+                        lambda exc, request: (
+                            f"{request.tool_call.get('name', 'tool')} failed with "
+                            f"{type(exc).__name__}. Check the arguments or use another tool."
+                        )
+                    ),
+                ]
+            )
             self._agent_graph = create_agent_from_config(
                 build_agent_config(
                     self.base_dir,
                     self.tools,
-                    middleware=[
-                        ContextManagementMiddleware(
-                            self.context_manager,
-                            self._summary_model,
-                        ),
-                        ErrorRecoveryMiddleware(
-                            self.context_manager,
-                            self._summary_model,
-                            RecoveryPolicy(
-                                max_retries=settings.recovery_max_retries,
-                                initial_delay_seconds=(
-                                    settings.recovery_initial_delay_ms / 1000
-                                ),
-                                max_delay_seconds=(
-                                    settings.recovery_max_delay_ms / 1000
-                                ),
-                                max_continuations=settings.recovery_max_continuations,
-                                default_max_output_tokens=(
-                                    settings.recovery_default_max_output_tokens
-                                ),
-                                escalated_max_output_tokens=(
-                                    settings.recovery_escalated_max_output_tokens
-                                ),
-                            ),
-                            fallback_model=fallback_model,
-                        ),
-                        ToolErrorMiddleware(
-                            lambda exc, request: (
-                                f"{request.tool_call.get('name', 'tool')} failed with "
-                                f"{type(exc).__name__}. Check the arguments or use another tool."
-                            )
-                        ),
-                    ],
+                    middleware=middleware,
                     checkpointer=self.checkpointer,
                 )
             )
@@ -198,6 +240,41 @@ class AgentManager:
         if self.checkpointer is not None:
             await self.checkpointer.adelete_thread(session_id)
 
+    async def _select_memory_context(self, user_request: str) -> str:
+        if self.memory_store is None or self.memory_selector is None:
+            return ""
+        try:
+            catalog = await asyncio.to_thread(self.memory_store.list_metadata)
+            selection = await self.memory_selector.select(user_request, catalog)
+            memories = await asyncio.to_thread(
+                self.memory_store.get_memories,
+                selection.ids,
+            )
+            logger.info(
+                "memory selector selected=%s fallback=%s failure=%s",
+                len(memories),
+                selection.used_fallback,
+                selection.failure_reason,
+            )
+            return format_memory_context(memories)
+        except Exception as exc:
+            logger.warning("memory selection skipped: %s", type(exc).__name__)
+            return ""
+
+    async def _extract_turn_memories(self, messages: list[AnyMessage]) -> None:
+        if self.memory_extractor is None:
+            return
+        try:
+            result = await self.memory_extractor.extract_and_save(messages)
+            logger.info(
+                "memory extractor candidates=%s saved=%s failure=%s",
+                result.candidates,
+                len(result.saved),
+                result.failure_reason,
+            )
+        except Exception as exc:
+            logger.warning("memory extraction skipped: %s", type(exc).__name__)
+
     async def astream(
         self,
         message: str,
@@ -209,11 +286,18 @@ class AgentManager:
         current_user_message = HumanMessage(content=message)
         turn_messages.append(current_user_message)
 
+        memory_context = await self._select_memory_context(message)
+
         final_content_parts: list[str] = []
         last_ai_message = ""
         pending_tools: dict[str, dict[str, str]] = {}
-        persisted_turn_messages: list[AnyMessage] = [current_user_message]
-        run_context = AgentRunContext(session_id=session_id)
+        raw_turn_snapshot: list[AnyMessage] = [current_user_message]
+        persisted_turn_messages = raw_turn_snapshot
+        run_context = AgentRunContext(
+            session_id=session_id,
+            memory_context=memory_context,
+            raw_turn_snapshot=raw_turn_snapshot,
+        )
 
         async for mode, payload in self._build_agent().astream(
             {"messages": turn_messages},
@@ -323,6 +407,8 @@ class AgentManager:
             if final_ai is not None
             else {}
         )
+        if final_content and recovery.get("status", "completed") != "error":
+            await self._extract_turn_memories(list(run_context.raw_turn_snapshot))
         yield {
             "type": "done",
             "content": final_content,

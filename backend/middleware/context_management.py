@@ -5,7 +5,7 @@ from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, RemoveMessage
+from langchain_core.messages import AIMessage, AnyMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
@@ -18,6 +18,8 @@ from .error_recovery import RecoveryState
 class AgentRunContext:
     session_id: str = "default"
     recovery_state: RecoveryState = field(default_factory=RecoveryState)
+    memory_context: str = ""
+    raw_turn_snapshot: list[AnyMessage] = field(default_factory=list)
 
 
 class ContextManagementMiddleware(AgentMiddleware):

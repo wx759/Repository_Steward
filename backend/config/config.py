@@ -65,6 +65,11 @@ class Settings:
     recovery_default_max_output_tokens: int = 8_192
     recovery_escalated_max_output_tokens: int = 65_536
     llm_fallback_model: str | None = None
+    memory_enabled: bool = True
+    memory_selector_max_items: int = 5
+    memory_side_call_timeout_seconds: int = 20
+    memory_extract_input_chars: int = 12_000
+    memory_extract_max_items: int = 3
 
 
 def _load_paths() -> tuple[Path, Path, Path]:
@@ -130,6 +135,18 @@ def _positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     config_dir, backend_dir, project_root = _load_paths()
@@ -171,4 +188,18 @@ def get_settings() -> Settings:
             "RECOVERY_ESCALATED_MAX_OUTPUT_TOKENS", 65_536
         ),
         llm_fallback_model=_first_env("LLM_FALLBACK_MODEL"),
+        memory_enabled=_bool_env("MEMORY_ENABLED", True),
+        memory_selector_max_items=min(
+            _positive_int_env("MEMORY_SELECTOR_MAX_ITEMS", 5),
+            5,
+        ),
+        memory_side_call_timeout_seconds=_positive_int_env(
+            "MEMORY_SIDE_CALL_TIMEOUT_SECONDS", 20
+        ),
+        memory_extract_input_chars=_positive_int_env(
+            "MEMORY_EXTRACT_INPUT_CHARS", 12_000
+        ),
+        memory_extract_max_items=_positive_int_env(
+            "MEMORY_EXTRACT_MAX_ITEMS", 3
+        ),
     )
