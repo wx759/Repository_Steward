@@ -150,7 +150,7 @@ def test_legacy_ui_session_messages_are_migrated_on_read(tmp_path: Path) -> None
     path.write_text(json.dumps(record), encoding="utf-8")
 
     migrated = manager.load_session_record(session["id"])
-    assert migrated["schema_version"] == 2
+    assert migrated["schema_version"] == 3
     assert [message["type"] for message in migrated["messages"]] == [
         "human",
         "ai",
@@ -168,10 +168,25 @@ def test_prompt_is_composed_from_workspace_and_skill_files(tmp_path: Path) -> No
     for label, relative_path in SYSTEM_COMPONENTS:
         assert f"<!-- {label} -->" in prompt
         assert f"content:{relative_path}" in prompt
+    assert "not files or directories in the user's selected repository" in prompt
+    assert "must be grounded only in results from tools" in prompt
 
 
 def test_first_tool_set_is_minimal(tmp_path: Path) -> None:
-    assert [tool.name for tool in get_all_tools(tmp_path)] == ["read_file", "terminal"]
+    assert [tool.name for tool in get_all_tools(tmp_path)] == [
+        "read_file",
+        "write_file",
+        "terminal",
+    ]
+
+
+def test_system_prompt_declares_single_steward(tmp_path: Path) -> None:
+    from service.prompt_builder import build_system_prompt
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "STEWARD.md").write_text("single long-lived Steward Agent", encoding="utf-8")
+    assert "single long-lived Steward Agent" in build_system_prompt(tmp_path)
 
 
 def test_core_tools_read_files_and_run_shell(tmp_path: Path) -> None:

@@ -48,6 +48,8 @@ class Settings:
     llm_model: str
     llm_api_key: str | None
     llm_base_url: str
+    workspace_root: Path
+    default_workspace_path: Path
     component_char_limit: int = 20_000
     terminal_timeout_seconds: int = 30
     context_max_tokens: int = 50_000
@@ -159,6 +161,14 @@ def get_settings() -> Settings:
         llm_model=_model(provider),
         llm_api_key=_api_key(provider),
         llm_base_url=_base_url(provider),
+        workspace_root=(workspace_root := Path(
+            os.getenv("WORKSPACE_ROOT") or project_root.parent
+        ).expanduser().resolve()),
+        default_workspace_path=(
+            workspace_root / os.environ["DEFAULT_WORKSPACE_RELATIVE_PATH"]
+            if os.getenv("DEFAULT_WORKSPACE_RELATIVE_PATH")
+            else project_root
+        ).expanduser().resolve(),
         context_max_tokens=_positive_int_env("CONTEXT_MAX_TOKENS", 50_000),
         context_token_reserve=_positive_int_env("CONTEXT_TOKEN_RESERVE", 8_000),
         context_max_messages=_positive_int_env("CONTEXT_MAX_MESSAGES", 50),

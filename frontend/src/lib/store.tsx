@@ -1,18 +1,20 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 import {
   createSession,
+  createWorkspace,
   deleteSession,
   getSessionHistory,
   listSessions,
-  listSkills,
-  loadFile,
+  listRuns,
+  listWorkspaces,
   renameSession,
-  saveFile,
   streamChat,
   type SessionSummary,
+  type Run,
+  type Workspace,
   type ToolCall
 } from "@/lib/api";
 
@@ -27,32 +29,23 @@ type Message = {
 
 type AppStore = {
   sessions: SessionSummary[];
+  workspaces: Workspace[];
+  selectedWorkspaceId: string;
+  currentWorkspace: Workspace | null;
+  runs: Run[];
   currentSessionId: string | null;
   messages: Message[];
   isStreaming: boolean;
-  skills: Array<{ name: string; description: string; path: string }>;
-  editableFiles: string[];
-  inspectorPath: string;
-  inspectorContent: string;
-  inspectorDirty: boolean;
   sidebarWidth: number;
   createNewSession: () => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   sendMessage: (value: string) => Promise<void>;
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
-  loadInspectorFile: (path: string) => Promise<void>;
-  updateInspectorContent: (value: string) => void;
-  saveInspector: () => Promise<void>;
   setSidebarWidth: (width: number) => void;
+  setSelectedWorkspaceId: (workspaceId: string) => void;
+  addWorkspace: (rootPath: string, name?: string) => Promise<Workspace>;
 };
-
-const FIXED_FILES = [
-  "workspace/SOUL.md",
-  "workspace/IDENTITY.md",
-  "workspace/USER.md",
-  "workspace/AGENTS.md"
-];
 
 const StoreContext = createContext<AppStore | null>(null);
 const makeId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -91,48 +84,57 @@ function toUiMessages(history: Awaited<ReturnType<typeof getSessionHistory>>["me
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
+  const [runs, setRuns] = useState<Run[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [skills, setSkills] = useState<Array<{ name: string; description: string; path: string }>>([]);
-  const [inspectorPath, setInspectorPath] = useState("workspace/AGENTS.md");
-  const [inspectorContent, setInspectorContent] = useState("");
-  const [inspectorDirty, setInspectorDirty] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(308);
-
-  const editableFiles = useMemo(
-    () => [...FIXED_FILES, ...skills.map((skill) => skill.path)],
-    [skills]
-  );
+  const currentSession = sessions.find((item) => item.id === currentSessionId);
+  const currentWorkspace = workspaces.find(
+    (item) => item.workspace_id === (currentSession?.workspace_id || selectedWorkspaceId)
+  ) ?? null;
 
   async function refreshSessions() {
     setSessions(await listSessions());
   }
 
-  async function refreshSkills() {
-    setSkills(await listSkills());
-  }
-
   async function refreshSessionDetails(sessionId: string) {
     const history = await getSessionHistory(sessionId);
     setMessages(toUiMessages(history.messages));
+    setRuns(await listRuns(sessionId));
   }
 
   async function createNewSession() {
-    const created = await createSession();
-    await refreshSessions();
-    setCurrentSessionId(created.id);
+    setCurrentSessionId(null);
     setMessages([]);
+    setRuns([]);
+  }
+
+  async function addWorkspace(rootPath: string, name?: string) {
+    const created = await createWorkspace(rootPath, name);
+    const next = await listWorkspaces();
+    setWorkspaces(next);
+    setSelectedWorkspaceId(created.workspace_id);
+    setCurrentSessionId(null);
+    setMessages([]);
+    setRuns([]);
+    return created;
   }
 
   async function selectSession(sessionId: string) {
     setCurrentSessionId(sessionId);
+    const session = sessions.find((item) => item.id === sessionId);
+    if (session?.workspace_id) setSelectedWorkspaceId(session.workspace_id);
     await refreshSessionDetails(sessionId);
   }
 
   async function ensureSession() {
     if (currentSessionId) return currentSessionId;
-    const created = await createSession();
+    const workspaceId = selectedWorkspaceId || workspaces[0]?.workspace_id;
+    if (!workspaceId) throw new Error("请先选择 Repository");
+    const created = await createSession(workspaceId);
     setCurrentSessionId(created.id);
     await refreshSessions();
     return created.id;
@@ -171,6 +173,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
               ...message,
               recoveryMessage: String(data.message ?? "正在尝试恢复模型调用……")
             }));
+          } else if (event === "run") {
+            void listRuns(sessionId).then(setRuns);
           } else if (event === "tool_start") {
             patchAssistant((message) => ({
               ...message,
@@ -188,6 +192,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 index === calls.length - 1 ? { ...call, output: String(data.output ?? "") } : call
               )
             }));
+            if (String(data.tool ?? "") === "delegate_task") void listRuns(sessionId).then(setRuns);
           } else if (event === "new_response") {
             // Keep all internal tool rounds inside the current assistant turn.
             // The UI exposes only one compact working state and the final answer.
@@ -234,51 +239,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (remaining.length) {
       setCurrentSessionId(remaining[0].id);
       await refreshSessionDetails(remaining[0].id);
-    } else {
-      setCurrentSessionId(null);
-      setMessages([]);
+      } else {
+        setCurrentSessionId(null);
+        setMessages([]);
+      setRuns([]);
     }
-  }
-
-  async function loadInspectorFile(path: string) {
-    const file = await loadFile(path);
-    setInspectorPath(path);
-    setInspectorContent(file.content);
-    setInspectorDirty(false);
-  }
-
-  async function saveInspector() {
-    await saveFile(inspectorPath, inspectorContent);
-    setInspectorDirty(false);
-    await refreshSkills();
   }
 
   useEffect(() => {
     void (async () => {
-      const [initialSessions, initialSkills] = await Promise.all([listSessions(), listSkills()]);
-      setSkills(initialSkills);
+      const [initialSessions, initialWorkspaces] = await Promise.all([
+        listSessions(), listWorkspaces()
+      ]);
+      setWorkspaces(initialWorkspaces);
+      setSelectedWorkspaceId(initialWorkspaces[0]?.workspace_id ?? "");
       if (initialSessions.length) {
         setSessions(initialSessions);
         setCurrentSessionId(initialSessions[0].id);
+        setSelectedWorkspaceId(initialSessions[0].workspace_id);
         await refreshSessionDetails(initialSessions[0].id);
-      } else {
-        const created = await createSession();
-        setSessions([created]);
-        setCurrentSessionId(created.id);
       }
-      const file = await loadFile("workspace/AGENTS.md");
-      setInspectorContent(file.content);
     })();
   }, []);
 
   return <StoreContext.Provider value={{
-    sessions, currentSessionId, messages, isStreaming, skills, editableFiles,
-    inspectorPath, inspectorContent, inspectorDirty, sidebarWidth,
+    sessions, workspaces, selectedWorkspaceId, currentWorkspace, runs,
+    currentSessionId, messages, isStreaming, sidebarWidth,
     createNewSession, selectSession, sendMessage, renameCurrentSession, removeSession,
-    loadInspectorFile, updateInspectorContent: (value) => {
-      setInspectorContent(value);
-      setInspectorDirty(true);
-    }, saveInspector, setSidebarWidth
+    setSidebarWidth,
+    setSelectedWorkspaceId: (workspaceId) => {
+      setSelectedWorkspaceId(workspaceId);
+      setCurrentSessionId(null);
+      setMessages([]);
+      setRuns([]);
+    }, addWorkspace
   }}>{children}</StoreContext.Provider>;
 }
 

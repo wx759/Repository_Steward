@@ -6,11 +6,15 @@ services:
     container_name: repository-steward-backend
     env_file:
       - ./backend/config/.env
+    environment:
+      WORKSPACE_ROOT: /workspaces
+      DEFAULT_WORKSPACE_RELATIVE_PATH: ${DEFAULT_WORKSPACE_RELATIVE_PATH:-codeAgent}
     init: true
     ports:
       - "8002:8002"
     volumes:
       - ./backend:/app
+      - ${WORKSPACE_HOST_ROOT:-..}:/workspaces
     healthcheck:
       test:
         - CMD

@@ -13,6 +13,7 @@ router = APIRouter()
 
 class CreateSessionRequest(BaseModel):
     title: str = "新会话"
+    workspace_id: str
 
 
 class RenameSessionRequest(BaseModel):
@@ -32,12 +33,33 @@ def _session_manager():
 
 @router.get("/sessions")
 async def list_sessions() -> list[dict[str, Any]]:
-    return _session_manager().list_sessions()
+    return [
+        item
+        for item in _session_manager().list_sessions()
+        if item.get("workspace_id") != agent_manager.default_workspace_id
+    ]
 
 
 @router.post("/sessions")
 async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
-    return _session_manager().create_session(title=payload.title)
+    if agent_manager.workspace_manager is None:
+        raise HTTPException(status_code=503, detail="Workspace manager is not initialized")
+    try:
+        workspace = agent_manager.workspace_manager.get_workspace(payload.workspace_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if (
+        agent_manager.base_dir is not None
+        and workspace.root_path == str(agent_manager.base_dir.parent.resolve())
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Repository Steward cannot target its own application repository",
+        )
+    return _session_manager().create_session(
+        title=payload.title,
+        workspace_id=payload.workspace_id,
+    )
 
 
 @router.put("/sessions/{session_id}")

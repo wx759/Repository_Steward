@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Braces, FileSearch, Terminal } from "lucide-react";
+import { Braces, FileSearch, FolderPlus, Terminal } from "lucide-react";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { useAppStore } from "@/lib/store";
+import { RunProgress } from "@/components/chat/RunProgress";
 
 const suggestions = [
   { icon: FileSearch, label: "了解仓库", prompt: "请分析当前仓库的目录结构和主要模块" },
@@ -13,23 +14,26 @@ const suggestions = [
 ];
 
 export function ChatPanel() {
-  const { messages, sendMessage, isStreaming } = useAppStore();
+  const { messages, sendMessage, isStreaming, currentWorkspace } = useAppStore();
   const endRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
   return (
-    <section className="panel flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-2xl">
+    <section className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-white">
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
+        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-8 lg:px-12 lg:py-8">
           <div className="mx-auto w-full max-w-4xl space-y-7">
-            {!messages.length && (
+            <RunProgress />
+            {!messages.length && !currentWorkspace && (
+              <div className="flex min-h-[56vh] flex-col items-center justify-center py-10 text-center"><div className="mb-5 flex h-12 w-12 items-center justify-center rounded-full border border-[#e5e5e5] bg-white text-[#212121]"><FolderPlus size={22} /></div><p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">No repository selected</p><h1 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-[#212121]">先连接一个真实代码仓库</h1><p className="mt-3 max-w-md text-sm leading-6 text-[#6b6b6b]">从左侧 Workspace 区域添加本地 Git 仓库。Repository Steward 不会再默认操作自身代码。</p></div>
+            )}
+            {!messages.length && currentWorkspace && (
               <div className="flex min-h-[56vh] flex-col items-center justify-center py-10 text-center">
-                <div className="relative mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-[#8d80ed] to-[#6555d2] text-white shadow-[0_18px_45px_rgba(104,89,217,.22)]"><Braces size={27} /><div className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-[var(--color-success)]" /></div>
-                <p className="text-[11px] font-medium uppercase tracking-[0.25em] text-slate-400">AI repository maintainer</p>
-                <h1 className="mt-3 text-3xl font-semibold tracking-[-0.045em] text-slate-900 sm:text-4xl">今天想维护什么？</h1>
-                <p className="mt-3 max-w-lg text-sm leading-6 text-[var(--color-ink-soft)]">我可以读取代码、修改文件、运行命令，并在多轮对话中持续理解你的仓库。</p>
+                <div className="relative mb-6 flex h-12 w-12 items-center justify-center rounded-full bg-[#10a37f] text-white"><Braces size={22} /></div>
+                <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">{currentWorkspace.name} · {currentWorkspace.branch}</p>
+                <h1 className="mt-3 text-3xl font-semibold tracking-[-0.035em] text-[#212121]">从一个真实任务开始</h1>
                 <div className="mt-8 grid w-full max-w-2xl gap-2 sm:grid-cols-3">
                   {suggestions.map(({ icon: Icon, label, prompt }) => (
-                    <button className="subtle-panel group flex items-center gap-3 rounded-xl px-4 py-3 text-left text-sm text-slate-600 shadow-sm transition hover:border-violet-200 hover:bg-violet-50 hover:text-slate-900" key={label} onClick={() => void sendMessage(prompt)} type="button"><Icon className="shrink-0 text-slate-400 transition group-hover:text-[#6859d9]" size={16} /><span>{label}</span></button>
+                    <button className="group flex items-center gap-3 rounded-xl border border-[#e5e5e5] bg-white px-4 py-3 text-left text-sm text-[#5d5d5d] transition hover:bg-[#f7f7f7] hover:text-[#212121]" key={label} onClick={() => void sendMessage(prompt)} type="button"><Icon className="shrink-0 text-[#8a8a8a] transition group-hover:text-[#212121]" size={16} /><span>{label}</span></button>
                   ))}
                 </div>
               </div>
@@ -38,7 +42,7 @@ export function ChatPanel() {
             <div ref={endRef} />
           </div>
         </div>
-        <ChatInput disabled={isStreaming} onSend={sendMessage} />
+        <ChatInput disabled={isStreaming || !currentWorkspace} repositoryReady={Boolean(currentWorkspace)} onSend={sendMessage} />
       </div>
     </section>
   );

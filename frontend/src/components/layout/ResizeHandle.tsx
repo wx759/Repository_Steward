@@ -23,7 +23,7 @@ export function ResizeHandle({ onResize }: { onResize: (delta: number) => void }
       className="group hidden w-3 cursor-col-resize items-center justify-center md:flex"
       onMouseDown={() => setDragging(true)}
     >
-      <div className={`h-12 w-px rounded-full transition-all ${dragging ? "h-24 bg-ocean" : "bg-slate-300 group-hover:h-20 group-hover:bg-violet-300"}`} />
+      <div className={`h-12 w-px rounded-full transition-all ${dragging ? "h-24 bg-[#10a37f]" : "bg-slate-300 group-hover:h-20 group-hover:bg-slate-400"}`} />
     </div>
   );
 }

@@ -53,7 +53,8 @@ class MemoryStore:
                                     status IN ('active', 'superseded', 'archived')
                                 ),
                     created_at  TEXT NOT NULL,
-                    updated_at  TEXT NOT NULL
+                    updated_at  TEXT NOT NULL,
+                    workspace_id TEXT NULL
                 )
                 """
             )
@@ -70,12 +71,15 @@ class MemoryStore:
                     )
                     """
                 )
+            if "workspace_id" not in columns:
+                connection.execute("ALTER TABLE memories ADD COLUMN workspace_id TEXT NULL")
             connection.executescript(
                 """
                 DROP INDEX IF EXISTS ux_memories_name_nocase;
+                DROP INDEX IF EXISTS ux_memories_active_name_nocase;
 
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_memories_active_name_nocase
-                ON memories(name COLLATE NOCASE)
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_memories_active_name_scope_nocase
+                ON memories(name COLLATE NOCASE, COALESCE(workspace_id, ''))
                 WHERE status = 'active';
 
                 CREATE INDEX IF NOT EXISTS ix_memories_updated_at
@@ -83,6 +87,9 @@ class MemoryStore:
 
                 CREATE INDEX IF NOT EXISTS ix_memories_status_updated_at
                 ON memories(status, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS ix_memories_workspace_status
+                ON memories(workspace_id, status, updated_at DESC);
                 """
             )
 
@@ -101,6 +108,11 @@ class MemoryStore:
             type=cast(MemoryType, memory_type),
             description=description,
             body=body,
+            workspace_id=(
+                None
+                if memory_type == "user"
+                else (draft.workspace_id.strip() if draft.workspace_id else None)
+            ),
         )
 
     @staticmethod
@@ -113,6 +125,7 @@ class MemoryStore:
             status=cast(MemoryStatus, str(row["status"])),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            workspace_id=(str(row["workspace_id"]) if row["workspace_id"] else None),
         )
 
     @classmethod
@@ -126,6 +139,7 @@ class MemoryStore:
             status=metadata.status,
             created_at=metadata.created_at,
             updated_at=metadata.updated_at,
+            workspace_id=metadata.workspace_id,
             body=str(row["body"]),
         )
 
@@ -141,12 +155,27 @@ class MemoryStore:
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, name, type, description, status, created_at, updated_at
+                SELECT id, name, type, description, status, created_at, updated_at, workspace_id
                 FROM memories
                 {where_clause}
                 ORDER BY updated_at DESC, name COLLATE NOCASE ASC
                 """,
                 parameters,
+            ).fetchall()
+        return [self._metadata_from_row(row) for row in rows]
+
+    def list_scoped_metadata(self, workspace_id: str) -> list[MemoryMetadata]:
+        """Return global user memories plus memories owned by this repository."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, name, type, description, status, created_at, updated_at, workspace_id
+                FROM memories
+                WHERE status = 'active'
+                  AND ((type = 'user' AND workspace_id IS NULL) OR workspace_id = ?)
+                ORDER BY updated_at DESC, name COLLATE NOCASE ASC
+                """,
+                (workspace_id,),
             ).fetchall()
         return [self._metadata_from_row(row) for row in rows]
 
@@ -176,8 +205,8 @@ class MemoryStore:
                 connection.execute(
                     """
                     INSERT INTO memories (
-                        id, name, type, description, body, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                        id, name, type, description, body, status, created_at, updated_at, workspace_id
+                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
                     """,
                     (
                         memory_id,
@@ -187,6 +216,7 @@ class MemoryStore:
                         cleaned.body,
                         now,
                         now,
+                        cleaned.workspace_id,
                     ),
                 )
                 connection.commit()
@@ -201,6 +231,7 @@ class MemoryStore:
             body=cleaned.body,
             created_at=now,
             updated_at=now,
+            workspace_id=cleaned.workspace_id,
         )
 
     def update_memory(self, memory_id: str, draft: MemoryDraft) -> MemoryRecord:
@@ -218,7 +249,7 @@ class MemoryStore:
                 connection.execute(
                     """
                     UPDATE memories
-                    SET name = ?, type = ?, description = ?, body = ?, updated_at = ?
+                    SET name = ?, type = ?, description = ?, body = ?, updated_at = ?, workspace_id = ?
                     WHERE id = ?
                     """,
                     (
@@ -227,6 +258,7 @@ class MemoryStore:
                         cleaned.description,
                         cleaned.body,
                         now,
+                        cleaned.workspace_id,
                         memory_id,
                     ),
                 )
@@ -242,6 +274,7 @@ class MemoryStore:
             body=cleaned.body,
             created_at=str(existing["created_at"]),
             updated_at=now,
+            workspace_id=cleaned.workspace_id,
         )
 
     def supersede_memory(
@@ -269,8 +302,8 @@ class MemoryStore:
                 connection.execute(
                     """
                     INSERT INTO memories (
-                        id, name, type, description, body, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                        id, name, type, description, body, status, created_at, updated_at, workspace_id
+                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
                     """,
                     (
                         replacement_id,
@@ -280,6 +313,7 @@ class MemoryStore:
                         cleaned.body,
                         now,
                         now,
+                        cleaned.workspace_id,
                     ),
                 )
                 connection.commit()
@@ -296,6 +330,7 @@ class MemoryStore:
             body=cleaned.body,
             created_at=now,
             updated_at=now,
+            workspace_id=cleaned.workspace_id,
         )
 
     def archive_memory(self, memory_id: str) -> bool:

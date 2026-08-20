@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from dataclasses import replace
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -142,8 +143,16 @@ class MemoryExtractor:
         self.timeout_seconds = timeout_seconds
         self.input_chars = max(1_000, input_chars)
 
-    async def extract_and_save(self, messages: list[AnyMessage]) -> ExtractionResult:
-        catalog = await asyncio.to_thread(self.store.list_metadata)
+    async def extract_and_save(
+        self,
+        messages: list[AnyMessage],
+        *,
+        workspace_id: str | None = None,
+    ) -> ExtractionResult:
+        catalog = await asyncio.to_thread(
+            self.store.list_scoped_metadata,
+            workspace_id,
+        ) if workspace_id else await asyncio.to_thread(self.store.list_metadata)
         snapshot = format_turn_snapshot(messages, max_chars=self.input_chars)
         user_text = "\n".join(
             _message_text(message.content)
@@ -196,6 +205,10 @@ class MemoryExtractor:
                     continue
 
                 draft = cast(MemoryDraft, operation.draft)
+                draft = replace(
+                    draft,
+                    workspace_id=None if draft.type == "user" else workspace_id,
+                )
                 if _contains_secret(draft):
                     continue
                 if operation.action == "create":

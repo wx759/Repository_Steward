@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -19,6 +19,10 @@ from langchain_core.messages import (
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from config import get_settings
+from delegation.service import DelegationService
+from delegation.tool import DelegateTaskTool
+from delegation.reviewer import Reviewer
+from delegation.worker_factory import WorkerFactory
 from graph.agent_factory import build_agent_config, create_agent_from_config
 from graph.llm import build_llm_config_from_settings, get_llm
 from middleware import (
@@ -36,10 +40,19 @@ from memory import (
 )
 from service.context_manager import ContextManager, ContextPolicy
 from service.session_manager import SessionManager
+from service.run_manager import RunManager
+from service.workspace_manager import Workspace, WorkspaceManager
 from tools import get_all_tools
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WorkspaceRuntime:
+    workspace: Workspace
+    tools: list
+    agent_graph: Any = None
 
 
 def _stringify_content(content: Any) -> str:
@@ -68,6 +81,11 @@ class AgentManager:
         self.memory_store: MemoryStore | None = None
         self.memory_selector: MemorySelector | None = None
         self.memory_extractor: MemoryExtractor | None = None
+        self.workspace_manager: WorkspaceManager | None = None
+        self.default_workspace_id: str | None = None
+        self._workspace_runtimes: dict[str, WorkspaceRuntime] = {}
+        self.delegation_service: DelegationService | None = None
+        self.run_manager: RunManager | None = None
 
     def initialize(
         self,
@@ -77,8 +95,17 @@ class AgentManager:
     ) -> None:
         self.base_dir = base_dir
         self.session_manager = SessionManager(base_dir)
-        self.tools = get_all_tools(base_dir)
         settings = get_settings()
+        self.workspace_manager = WorkspaceManager(base_dir, settings.workspace_root)
+        default_workspace = self.workspace_manager.create_workspace(
+            settings.default_workspace_path,
+            name=settings.default_workspace_path.name,
+        )
+        self.default_workspace_id = default_workspace.workspace_id
+        self.session_manager.bind_unscoped_sessions(default_workspace.workspace_id)
+        self.tools = []
+        self._workspace_runtimes = {}
+        self.run_manager = RunManager(base_dir)
         self.context_manager = ContextManager(
             base_dir,
             ContextPolicy(
@@ -97,8 +124,14 @@ class AgentManager:
                 summary_retry_max_seconds=(settings.recovery_max_delay_ms / 1000),
             ),
         )
+        self._summary_model = self._build_chat_model()
+        worker_model = self._build_chat_model()
+        delegated_recovery = [self._make_recovery_middleware()]
+        self.delegation_service = DelegationService(
+            WorkerFactory(worker_model, middleware=delegated_recovery),
+            Reviewer(worker_model, middleware=delegated_recovery),
+        )
         self._agent_graph = None
-        self._summary_model = None
         self._side_model = None
         self.checkpointer = checkpointer
         self.memory_store = None
@@ -130,27 +163,88 @@ class AgentManager:
             )
         )
 
-    def _build_agent(self):
+    def _make_recovery_middleware(self) -> ErrorRecoveryMiddleware:
+        if self.context_manager is None or self._summary_model is None:
+            raise RuntimeError("Recovery dependencies are not initialized")
+        settings = get_settings()
+        fallback_model = None
+        if settings.llm_fallback_model:
+            fallback_config = replace(
+                build_llm_config_from_settings(settings, temperature=0.0, streaming=True),
+                model=settings.llm_fallback_model,
+            )
+            fallback_model = get_llm(fallback_config)
+        return ErrorRecoveryMiddleware(
+            self.context_manager,
+            self._summary_model,
+            RecoveryPolicy(
+                max_retries=settings.recovery_max_retries,
+                initial_delay_seconds=settings.recovery_initial_delay_ms / 1000,
+                max_delay_seconds=settings.recovery_max_delay_ms / 1000,
+                max_continuations=settings.recovery_max_continuations,
+                default_max_output_tokens=settings.recovery_default_max_output_tokens,
+                escalated_max_output_tokens=settings.recovery_escalated_max_output_tokens,
+            ),
+            fallback_model=fallback_model,
+        )
+
+    def _workspace_for_session(self, session_id: str) -> Workspace:
+        if self.session_manager is None or self.workspace_manager is None:
+            raise RuntimeError("AgentManager is not initialized")
+        record = self.session_manager.load_session_record(session_id)
+        workspace_id = record.get("workspace_id")
+        if not workspace_id:
+            if not self.default_workspace_id:
+                raise RuntimeError("Default workspace is not initialized")
+            record = self.session_manager.bind_workspace(session_id, self.default_workspace_id)
+            workspace_id = record["workspace_id"]
+        return self.workspace_manager.get_workspace(str(workspace_id))
+
+    def _runtime_for_session(self, session_id: str) -> WorkspaceRuntime:
+        workspace = (
+            self._workspace_for_session(session_id)
+            if self.workspace_manager is not None
+            else Workspace(
+                workspace_id="legacy-default",
+                name="legacy-default",
+                root_path=str(self.base_dir or Path.cwd()),
+                relative_path=".",
+                created_at=0,
+            )
+        )
+        runtime = self._workspace_runtimes.get(session_id)
+        if runtime is None:
+            tools = get_all_tools(Path(workspace.root_path))
+            if self.delegation_service is not None and self.run_manager is not None:
+                tools.append(
+                    DelegateTaskTool(
+                        Path(workspace.root_path),
+                        self.delegation_service,
+                        self.run_manager,
+                        session_id,
+                        workspace.workspace_id,
+                    )
+                )
+            runtime = WorkspaceRuntime(
+                workspace=workspace,
+                tools=tools,
+            )
+            self._workspace_runtimes[session_id] = runtime
+        return runtime
+
+    def _build_agent(self, session_id: str):
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
-        tools_id = id(self.tools)
-        if self._agent_graph is None or self._agent_graph_tools_id != tools_id:
+        # Keep lightweight unit-test/custom graph injection supported.
+        if self.workspace_manager is None and self._agent_graph is not None:
+            return self._agent_graph
+        runtime = self._runtime_for_session(session_id)
+        if runtime.agent_graph is None:
             if self.context_manager is None:
                 raise RuntimeError("Context manager is not initialized")
             if self._summary_model is None:
                 self._summary_model = self._build_chat_model()
             settings = get_settings()
-            fallback_model = None
-            if settings.llm_fallback_model:
-                fallback_config = replace(
-                    build_llm_config_from_settings(
-                        settings,
-                        temperature=0.0,
-                        streaming=True,
-                    ),
-                    model=settings.llm_fallback_model,
-                )
-                fallback_model = get_llm(fallback_config)
             middleware = [
                 ContextManagementMiddleware(
                     self.context_manager,
@@ -161,27 +255,7 @@ class AgentManager:
                 middleware.append(MemoryPromptMiddleware())
             middleware.extend(
                 [
-                    ErrorRecoveryMiddleware(
-                        self.context_manager,
-                        self._summary_model,
-                        RecoveryPolicy(
-                            max_retries=settings.recovery_max_retries,
-                            initial_delay_seconds=(
-                                settings.recovery_initial_delay_ms / 1000
-                            ),
-                            max_delay_seconds=(
-                                settings.recovery_max_delay_ms / 1000
-                            ),
-                            max_continuations=settings.recovery_max_continuations,
-                            default_max_output_tokens=(
-                                settings.recovery_default_max_output_tokens
-                            ),
-                            escalated_max_output_tokens=(
-                                settings.recovery_escalated_max_output_tokens
-                            ),
-                        ),
-                        fallback_model=fallback_model,
-                    ),
+                    self._make_recovery_middleware(),
                     ToolErrorMiddleware(
                         lambda exc, request: (
                             f"{request.tool_call.get('name', 'tool')} failed with "
@@ -190,16 +264,15 @@ class AgentManager:
                     ),
                 ]
             )
-            self._agent_graph = create_agent_from_config(
+            runtime.agent_graph = create_agent_from_config(
                 build_agent_config(
                     self.base_dir,
-                    self.tools,
+                    runtime.tools,
                     middleware=middleware,
                     checkpointer=self.checkpointer,
                 )
             )
-            self._agent_graph_tools_id = tools_id
-        return self._agent_graph
+        return runtime.agent_graph
 
     @staticmethod
     def _build_messages(history: list[Any]) -> list[AnyMessage]:
@@ -240,11 +313,14 @@ class AgentManager:
         if self.checkpointer is not None:
             await self.checkpointer.adelete_thread(session_id)
 
-    async def _select_memory_context(self, user_request: str) -> str:
+    async def _select_memory_context(self, user_request: str, workspace_id: str) -> str:
         if self.memory_store is None or self.memory_selector is None:
             return ""
         try:
-            catalog = await asyncio.to_thread(self.memory_store.list_metadata)
+            catalog = await asyncio.to_thread(
+                self.memory_store.list_scoped_metadata,
+                workspace_id,
+            )
             selection = await self.memory_selector.select(user_request, catalog)
             memories = await asyncio.to_thread(
                 self.memory_store.get_memories,
@@ -261,11 +337,18 @@ class AgentManager:
             logger.warning("memory selection skipped: %s", type(exc).__name__)
             return ""
 
-    async def _extract_turn_memories(self, messages: list[AnyMessage]) -> None:
+    async def _extract_turn_memories(
+        self,
+        messages: list[AnyMessage],
+        workspace_id: str,
+    ) -> None:
         if self.memory_extractor is None:
             return
         try:
-            result = await self.memory_extractor.extract_and_save(messages)
+            result = await self.memory_extractor.extract_and_save(
+                messages,
+                workspace_id=workspace_id,
+            )
             logger.info(
                 "memory extractor candidates=%s saved=%s superseded=%s archived=%s failure=%s",
                 result.candidates,
@@ -288,7 +371,21 @@ class AgentManager:
         current_user_message = HumanMessage(content=message)
         turn_messages.append(current_user_message)
 
-        memory_context = await self._select_memory_context(message)
+        workspace = (
+            self._workspace_for_session(session_id)
+            if self.workspace_manager is not None
+            else Workspace(
+                workspace_id="legacy-default",
+                name="legacy-default",
+                root_path=str(self.base_dir or Path.cwd()),
+                relative_path=".",
+                created_at=0,
+            )
+        )
+        memory_context = await self._select_memory_context(
+            message,
+            workspace.workspace_id,
+        )
 
         final_content_parts: list[str] = []
         last_ai_message = ""
@@ -301,14 +398,14 @@ class AgentManager:
             raw_turn_snapshot=raw_turn_snapshot,
         )
 
-        async for mode, payload in self._build_agent().astream(
+        async for mode, payload in self._build_agent(session_id).astream(
             {"messages": turn_messages},
             config=self._thread_config(session_id),
             context=run_context,
             stream_mode=["messages", "updates", "custom"],
         ):
             if mode == "custom":
-                if isinstance(payload, dict) and payload.get("type") == "recovery":
+                if isinstance(payload, dict) and payload.get("type") in {"recovery", "run"}:
                     yield payload
                 continue
 
@@ -410,7 +507,15 @@ class AgentManager:
             else {}
         )
         if final_content and recovery.get("status", "completed") != "error":
-            await self._extract_turn_memories(list(run_context.raw_turn_snapshot))
+            await self._extract_turn_memories(
+                list(run_context.raw_turn_snapshot),
+                workspace.workspace_id,
+            )
+        if self.run_manager is not None:
+            self.run_manager.finish_session_run(
+                session_id,
+                failed=recovery.get("status") == "error",
+            )
         yield {
             "type": "done",
             "content": final_content,

@@ -20,6 +20,7 @@ class MemoryDraft:
     type: MemoryType
     description: str
     body: str
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -31,8 +32,9 @@ class MemoryMetadata:
     status: MemoryStatus
     created_at: str
     updated_at: str
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True)
 class MemoryRecord(MemoryMetadata):
-    body: str
+    body: str = ""

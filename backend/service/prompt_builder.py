@@ -11,7 +11,17 @@ SYSTEM_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("Identity", "workspace/IDENTITY.md"),
     ("User Profile", "workspace/USER.md"),
     ("Agents Guide", "workspace/AGENTS.md"),
+    ("Steward Role", "workspace/STEWARD.md"),
 )
+
+SYSTEM_BOUNDARY = """<!-- Context Boundary -->
+The system components below are internal Repository Steward instructions and capabilities.
+They are not files or directories in the user's selected repository.
+Never include paths such as `skills/`, `workspace/`, `.qwen/`, or any other internal
+configuration path in a repository inventory unless a repository tool actually returned
+that exact path. Every claim about repository files, directories, Git state, or project
+structure must be grounded only in results from tools executed against the selected
+repository. If tool output and prior knowledge conflict, trust the tool output."""
 
 
 def _read_component(base_dir: Path, relative_path: str, limit: int) -> str:
@@ -26,7 +36,8 @@ def _read_component(base_dir: Path, relative_path: str, limit: int) -> str:
 
 def build_system_prompt(base_dir: Path) -> str:
     limit = get_settings().component_char_limit
-    return "\n\n".join(
+    components = (
         f"<!-- {label} -->\n{_read_component(base_dir, relative_path, limit)}"
         for label, relative_path in SYSTEM_COMPONENTS
     )
+    return "\n\n".join((SYSTEM_BOUNDARY, *components))

@@ -10,6 +10,31 @@ export type SessionSummary = {
   created_at: number;
   updated_at: number;
   message_count: number;
+  workspace_id: string;
+};
+
+export type Workspace = {
+  workspace_id: string;
+  name: string;
+  root_path: string;
+  relative_path: string;
+  branch: string;
+};
+
+export type RunTask = {
+  task_id: string;
+  role: string;
+  description: string;
+  status: "running" | "completed" | "failed";
+  review_status: "pending" | "passed" | "failed";
+};
+
+export type Run = {
+  run_id: string;
+  session_id: string;
+  goal: string;
+  status: "running" | "completed" | "failed";
+  tasks: RunTask[];
 };
 
 export type SessionHistory = {
@@ -57,11 +82,34 @@ export function listSessions() {
   return request<SessionSummary[]>("/sessions");
 }
 
-export function createSession(title = "新会话") {
+export function listWorkspaces() {
+  return request<Workspace[]>("/workspaces");
+}
+
+export function createWorkspace(rootPath: string, name?: string) {
+  return request<Workspace>("/workspaces", {
+    method: "POST",
+    body: JSON.stringify({ root_path: rootPath, name: name || undefined, require_git: true })
+  });
+}
+
+export function getWorkspaceConfig() {
+  return request<{ workspace_root: string }>("/workspaces/config");
+}
+
+export function discoverRepositories() {
+  return request<Array<{ name: string; root_path: string; relative_path: string }>>("/workspaces/discover");
+}
+
+export function createSession(workspaceId: string, title = "新会话") {
   return request<SessionSummary>("/sessions", {
     method: "POST",
-    body: JSON.stringify({ title })
+    body: JSON.stringify({ title, workspace_id: workspaceId })
   });
+}
+
+export function listRuns(sessionId: string) {
+  return request<Run[]>(`/runs?session_id=${encodeURIComponent(sessionId)}`);
 }
 
 export function renameSession(sessionId: string, title: string) {
@@ -77,23 +125,6 @@ export function deleteSession(sessionId: string) {
 
 export function getSessionHistory(sessionId: string) {
   return request<SessionHistory>(`/sessions/${sessionId}/history`);
-}
-
-export function listSkills() {
-  return request<Array<{ name: string; description: string; path: string }>>("/skills");
-}
-
-export function loadFile(path: string) {
-  return request<{ path: string; content: string }>(
-    `/files?path=${encodeURIComponent(path)}`
-  );
-}
-
-export function saveFile(path: string, content: string) {
-  return request<{ ok: boolean; path: string }>("/files", {
-    method: "POST",
-    body: JSON.stringify({ path, content })
-  });
 }
 
 export async function streamChat(

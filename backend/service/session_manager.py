@@ -28,14 +28,20 @@ class SessionManager:
             raise ValueError("Invalid session id")
         return self.sessions_dir / f"{session_id}.json"
 
-    def _default_record(self, session_id: str, title: str = "新会话") -> dict[str, Any]:
+    def _default_record(
+        self,
+        session_id: str,
+        title: str = "新会话",
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
         now = time.time()
         return {
             "id": session_id,
             "title": title,
             "created_at": now,
             "updated_at": now,
-            "schema_version": 2,
+            "schema_version": 3,
+            "workspace_id": workspace_id,
             "messages": [],
         }
 
@@ -60,8 +66,9 @@ class SessionManager:
         raw.setdefault("messages", [])
         raw["messages"], migrated = normalize_persisted_records(raw["messages"])
         removed_agent_context = raw.pop("agent_context", None) is not None
-        if migrated or removed_agent_context or raw.get("schema_version") != 2:
-            raw["schema_version"] = 2
+        raw.setdefault("workspace_id", None)
+        if migrated or removed_agent_context or raw.get("schema_version") != 3:
+            raw["schema_version"] = 3
             self._write_session(raw)
         return raw
 
@@ -85,8 +92,12 @@ class SessionManager:
             previous_role = role
         return count
 
-    def create_session(self, title: str = "新会话") -> dict[str, Any]:
-        record = self._default_record(uuid.uuid4().hex, title=title)
+    def create_session(self, title: str = "新会话", workspace_id: str | None = None) -> dict[str, Any]:
+        record = self._default_record(
+            uuid.uuid4().hex,
+            title=title,
+            workspace_id=workspace_id or "legacy-default",
+        )
         self._write_session(record)
         return record
 
@@ -97,21 +108,43 @@ class SessionManager:
                 record = self._read_session_file(path.stem)
             except (json.JSONDecodeError, OSError, ValueError):
                 continue
+            message_count = self._visible_message_count(record.get("messages", []))
+            if message_count == 0:
+                continue
             records.append(
                 {
                     "id": record.get("id", path.stem),
                     "title": record.get("title", "新会话"),
                     "created_at": record.get("created_at"),
                     "updated_at": record.get("updated_at"),
-                    "message_count": self._visible_message_count(
-                        record.get("messages", [])
-                    ),
+                    "message_count": message_count,
+                    "workspace_id": record.get("workspace_id"),
                 }
             )
         return sorted(records, key=lambda item: item.get("updated_at") or 0, reverse=True)
 
     def load_session_record(self, session_id: str) -> dict[str, Any]:
         return self._read_session_file(session_id)
+
+    def bind_workspace(self, session_id: str, workspace_id: str) -> dict[str, Any]:
+        """Bind a legacy unscoped session once; an existing binding is immutable."""
+        record = self._read_session_file(session_id)
+        current = record.get("workspace_id")
+        if current and current != workspace_id:
+            raise ValueError("A session cannot switch workspaces")
+        if not current:
+            record["workspace_id"] = workspace_id
+            self._write_session(record)
+        return record
+
+    def bind_unscoped_sessions(self, workspace_id: str) -> None:
+        for path in self.sessions_dir.glob("*.json"):
+            try:
+                record = self._read_session_file(path.stem)
+            except (json.JSONDecodeError, OSError, ValueError):
+                continue
+            if not record.get("workspace_id"):
+                self.bind_workspace(path.stem, workspace_id)
 
     def load_session(self, session_id: str) -> list[dict[str, Any]]:
         return self._read_session_file(session_id)["messages"]

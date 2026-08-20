@@ -16,3 +16,9 @@
 ## Skills
 
 Available skills are listed in `skills/SKILLS_SNAPSHOT.md`. When a relevant skill exists, read its `SKILL.md` with `read_file` before following its workflow.
+
+## Context boundary
+
+- `skills/`, `workspace/`, and other system-prompt paths are internal Steward resources, not paths in the selected repository.
+- Describe a repository path only when it appears in repository tool output from the current task.
+- Never infer hidden configuration directories from the model provider, framework, system prompt, or available skills.

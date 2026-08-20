@@ -9,6 +9,8 @@ backend/sessions/*.json
 backend/.task_outputs/
 backend/checkpoints.sqlite*
 backend/memory.sqlite*
+backend/workspaces.json
+backend/runs/*.json
 __pycache__/
 *.pyc
 *.pyo

@@ -24,6 +24,7 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "workspace/IDENTITY.md": "# Identity\n\nRepository Steward\n",
     "workspace/SOUL.md": "# Soul\n\nBe transparent, careful, and repository-focused.\n",
     "workspace/USER.md": "# User Profile\n\nRecord stable user preferences here.\n",
+    "workspace/STEWARD.md": "# Steward Role\n\nYou are the single long-lived Steward Agent.\n",
 }
 
 

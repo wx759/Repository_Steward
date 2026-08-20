@@ -433,7 +433,7 @@ def test_agent_manager_runs_select_load_main_extract_without_persisting_memory(
     class FakeExtractor:
         messages = None
 
-        async def extract_and_save(self, messages):
+        async def extract_and_save(self, messages, **_kwargs):
             self.messages = list(messages)
             return ExtractionResult(0, [])
 
