@@ -10,7 +10,7 @@ from delegation.models import TaskSpec, WorkerResult
 
 
 class RunManager:
-    """Small JSON-backed observability store for complex delegated work."""
+    """JSON-backed lifecycle store for one Agent execution per user request."""
 
     def __init__(self, base_dir: Path) -> None:
         self.runs_dir = base_dir / "runs"
@@ -32,10 +32,10 @@ class RunManager:
     def _read(self, run_id: str) -> dict[str, Any]:
         return json.loads(self._path(run_id).read_text(encoding="utf-8"))
 
-    def ensure_run(self, session_id: str, workspace_id: str, goal: str) -> dict[str, Any]:
-        active_id = self._active_by_session.get(session_id)
-        if active_id and self._path(active_id).exists():
-            return self._read(active_id)
+    def create_run(self, session_id: str, workspace_id: str, goal: str) -> dict[str, Any]:
+        active = self.get_active_run(session_id)
+        if active is not None:
+            raise RuntimeError("A run is already active for this session")
         now = time.time()
         run = {
             "run_id": uuid.uuid4().hex,
@@ -43,6 +43,8 @@ class RunManager:
             "workspace_id": workspace_id,
             "goal": goal,
             "status": "running",
+            "reason": None,
+            "error": None,
             "tasks": [],
             "created_at": now,
             "updated_at": now,
@@ -50,6 +52,57 @@ class RunManager:
         self._active_by_session[session_id] = run["run_id"]
         self._write(run)
         return run
+
+    def ensure_run(self, session_id: str, workspace_id: str, goal: str) -> dict[str, Any]:
+        """Return the request Run; retained for delegate_task integration."""
+        active_id = self._active_by_session.get(session_id)
+        if active_id and self._path(active_id).exists():
+            run = self._read(active_id)
+            if run.get("status") == "running":
+                return run
+        return self.create_run(session_id, workspace_id, goal)
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        path = self._path(run_id)
+        if not path.exists():
+            raise KeyError(f"Run not found: {run_id}")
+        return self._read(run_id)
+
+    def get_active_run(self, session_id: str) -> dict[str, Any] | None:
+        run_id = self._active_by_session.get(session_id)
+        if not run_id or not self._path(run_id).exists():
+            return None
+        run = self._read(run_id)
+        if run.get("status") != "running":
+            self._active_by_session.pop(session_id, None)
+            return None
+        return run
+
+    def finish_run(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        reason: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"completed", "interrupted", "failed"}:
+            raise ValueError(f"Invalid terminal run status: {status}")
+        run = self.get_run(run_id)
+        if run.get("status") == "running":
+            run["status"] = status
+            run["reason"] = reason
+            run["error"] = error
+            self._write(run)
+        if self._active_by_session.get(str(run["session_id"])) == run_id:
+            self._active_by_session.pop(str(run["session_id"]), None)
+        return run
+
+    def interrupt_run(self, run_id: str, reason: str = "user_cancelled") -> dict[str, Any]:
+        return self.finish_run(run_id, "interrupted", reason=reason)
+
+    def fail_run(self, run_id: str, error: str) -> dict[str, Any]:
+        return self.finish_run(run_id, "failed", reason="execution_error", error=error)
 
     def add_task(self, run_id: str, task: TaskSpec) -> str:
         run = self._read(run_id)
@@ -79,14 +132,23 @@ class RunManager:
             run["status"] = "failed"
         self._write(run)
 
-    def finish_session_run(self, session_id: str, *, failed: bool = False) -> None:
-        run_id = self._active_by_session.pop(session_id, None)
+    def finish_session_run(
+        self,
+        session_id: str,
+        *,
+        failed: bool = False,
+        reason: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        run_id = self._active_by_session.get(session_id)
         if not run_id or not self._path(run_id).exists():
             return
-        run = self._read(run_id)
-        if run["status"] == "running":
-            run["status"] = "failed" if failed else "completed"
-        self._write(run)
+        self.finish_run(
+            run_id,
+            "failed" if failed else "completed",
+            reason=reason,
+            error=error,
+        )
 
     def list_runs(self, session_id: str) -> list[dict[str, Any]]:
         runs = []

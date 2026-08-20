@@ -17,7 +17,7 @@ export function ChatMessage({
   role: "user" | "assistant";
   content: string;
   toolCalls: ToolCall[];
-  status?: "incomplete" | "error";
+  status?: "incomplete" | "interrupted" | "error";
   recoveryMessage?: string;
 }) {
   const isUser = role === "user";
@@ -55,6 +55,9 @@ export function ChatMessage({
           <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
             回答已达到自动续写上限，当前内容可能不完整。你可以发送“继续”。
           </div>
+        )}
+        {!isUser && status === "interrupted" && (
+          <div className="mt-3 text-xs text-slate-400">Run 已由用户停止，会话仍可继续。</div>
         )}
       </div>
     </article>

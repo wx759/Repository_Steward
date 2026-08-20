@@ -33,7 +33,11 @@ export type Run = {
   run_id: string;
   session_id: string;
   goal: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "interrupted" | "failed";
+  reason?: string | null;
+  error?: string | null;
+  created_at: number;
+  updated_at: number;
   tasks: RunTask[];
 };
 
@@ -46,7 +50,7 @@ export type SessionHistory = {
     role: "user" | "assistant";
     content: string;
     tool_calls?: ToolCall[];
-    status?: "incomplete" | "error";
+    status?: "incomplete" | "interrupted" | "error";
     finish_reason?: string;
     continuation_count?: number;
   }>;
@@ -110,6 +114,12 @@ export function createSession(workspaceId: string, title = "新会话") {
 
 export function listRuns(sessionId: string) {
   return request<Run[]>(`/runs?session_id=${encodeURIComponent(sessionId)}`);
+}
+
+export function cancelRun(runId: string) {
+  return request<Run>(`/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST"
+  });
 }
 
 export function renameSession(sessionId: string, title: string) {

@@ -23,6 +23,7 @@ Repository Steward 是一个面向本地 Git 仓库的 AI 代码维护助手。�
 - 按用户与仓库隔离的 SQLite 长期记忆；
 - L3 → L1 → L2 → L4 分层上下文压缩；
 - 限流退避、服务过载恢复、备用模型、强制压缩与自动续写；
+- 每次用户请求独立 Run，以及不依赖 SSE 断开的主动中断；
 - Next.js 仓库选择、会话历史、任务进度和 Markdown 消息界面。
 
 ## 整体运行流程
@@ -238,6 +239,16 @@ Memory 选择与提取使用隔离的旁路模型调用。旁路失败只记日�
 
 配置 `LLM_FALLBACK_MODEL` 后，主模型连续过载达到恢复条件时，可切换到同一 Provider、Base URL 和 API Key 下的备用模型。它适合相同兼容接口中的模型降级，不是跨 Provider 路由。
 
+## Run 生命周期与主动中断
+
+每次用户请求都会在 Agent 启动前创建独立 Run，而不再只在发生 Worker 委派时创建。Run 只记录 `run_id`、`session_id`、`workspace_id`、目标、状态、时间和错误原因；聊天消息仍归 Session，LangGraph 内部消息仍归 Checkpoint。
+
+Run 状态包括 `running`、`completed`、`interrupted` 和 `failed`。同一 Session 同时只允许一个 `running` Run。
+
+前端运行期间，发送按钮会变成停止按钮。点击后调用 `POST /api/runs/{run_id}/cancel`，后端将 Run 标记为 `interrupted`，并向实际执行协程发送取消信号，而不是只关闭 SSE。
+
+中断时不会保存模型生成到一半的文本，也不会执行本轮 Memory 提取。Session 保存用户消息、已经完整配对的工具调用/结果，以及固定助手消息“本次任务已中断”。可能含有未配对 tool call 的活动 Checkpoint 会被删除；下一轮从清洗后的 Session 历史重新建立合法 Checkpoint，因此 Session 可以继续聊天。
+
 ## Steward、Worker 与 Reviewer
 
 系统只有一个长期存在的 Steward。它拥有 Session、Checkpoint、上下文压缩和长期 Memory，并直接处理普通问答、仓库探索和小型改动。
@@ -392,6 +403,7 @@ MEMORY_ENABLED=false
 | `PUT/DELETE` | `/api/sessions/{id}` | 重命名或删除 Session |
 | `POST` | `/api/chat` | SSE 或非流式聊天 |
 | `GET` | `/api/runs?session_id=...` | 查询委派 Run / Task 状态 |
+| `POST` | `/api/runs/{run_id}/cancel` | 主动中断正在执行的 Run |
 
 ## 项目结构
 

@@ -14,7 +14,7 @@ const suggestions = [
 ];
 
 export function ChatPanel() {
-  const { messages, sendMessage, isStreaming, currentWorkspace } = useAppStore();
+  const { messages, sendMessage, cancelCurrentRun, isStreaming, currentWorkspace } = useAppStore();
   const endRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
   return (
@@ -42,7 +42,7 @@ export function ChatPanel() {
             <div ref={endRef} />
           </div>
         </div>
-        <ChatInput disabled={isStreaming || !currentWorkspace} repositoryReady={Boolean(currentWorkspace)} onSend={sendMessage} />
+        <ChatInput running={isStreaming} repositoryReady={Boolean(currentWorkspace)} onSend={sendMessage} onStop={cancelCurrentRun} />
       </div>
     </section>
   );

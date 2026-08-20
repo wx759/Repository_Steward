@@ -31,16 +31,29 @@ async def chat(payload: ChatRequest):
 
     record = session_manager.load_session_record(payload.session_id)
     history = await agent_manager.load_checkpoint_seed(payload.session_id)
+    if agent_manager.run_manager is None:
+        raise HTTPException(status_code=503, detail="Run manager is not initialized")
+    try:
+        workspace = agent_manager._workspace_for_session(payload.session_id)
+        run = agent_manager.run_manager.create_run(
+            payload.session_id,
+            workspace.workspace_id,
+            payload.message,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     is_first_user_message = not any(
         message.get("role") == "user" for message in record.get("messages", [])
     )
 
     async def events() -> AsyncIterator[dict[str, Any]]:
         try:
+            yield {"type": "run", "run_id": run["run_id"], "status": "running"}
             async for event in agent_manager.astream(
                 payload.message,
                 history,
                 session_id=payload.session_id,
+                run_id=run["run_id"],
             ):
                 event_type = event["type"]
                 if event_type == "done":
@@ -50,10 +63,16 @@ async def chat(payload: ChatRequest):
                             payload.session_id,
                             session_messages,
                         )
+                    if event.get("_reset_checkpoint"):
+                        await agent_manager.reset_checkpoint(payload.session_id)
 
                 yield event
 
-                if event_type == "done" and is_first_user_message:
+                if (
+                    event_type == "done"
+                    and event.get("status") != "interrupted"
+                    and is_first_user_message
+                ):
                     title = await agent_manager.generate_title(payload.message)
                     session_manager.set_title(payload.session_id, title)
                     yield {
@@ -63,6 +82,7 @@ async def chat(payload: ChatRequest):
                     }
         except Exception as exc:
             traceback.print_exc()
+            agent_manager.run_manager.fail_run(run["run_id"], str(exc))
             yield {"type": "error", "error": str(exc)}
 
     if payload.stream:

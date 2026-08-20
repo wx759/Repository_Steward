@@ -12,8 +12,9 @@ if str(BACKEND_DIR) not in sys.path:
 
 from service.prompt_builder import SYSTEM_COMPONENTS, build_system_prompt
 from service.session_manager import SessionManager
+from service.run_manager import RunManager
 from graph.agent import AgentManager
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from tools import get_all_tools
 from tools.skills_scanner import refresh_snapshot, scan_skills
 
@@ -346,6 +347,108 @@ def test_agent_forwards_recovery_event_and_incomplete_done_status(tmp_path: Path
     assert events[-1]["continuation_count"] == 3
 
 
+def test_agent_cancel_discards_partial_text_and_skips_memory_extraction(tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    class FakeGraph:
+        async def astream(self, _payload, **_kwargs):
+            yield "messages", (
+                AIMessageChunk(content="partial output"),
+                {"langgraph_node": "model"},
+            )
+            started.set()
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+    class FakeExtractor:
+        called = False
+
+        async def extract_and_save(self, *_args, **_kwargs):
+            self.called = True
+
+    manager = AgentManager()
+    manager.base_dir = tmp_path
+    manager.tools = []
+    manager._agent_graph = FakeGraph()
+    manager._agent_graph_tools_id = id(manager.tools)
+    manager.run_manager = RunManager(tmp_path)
+    extractor = FakeExtractor()
+    manager.memory_extractor = extractor  # type: ignore[assignment]
+    run = manager.run_manager.create_run("session", "workspace", "long task")
+
+    async def cancel_during_stream():
+        events = []
+
+        async def collect():
+            async for event in manager.astream(
+                "do work", [], session_id="session", run_id=run["run_id"]
+            ):
+                events.append(event)
+
+        task = asyncio.create_task(collect())
+        await started.wait()
+        manager.cancel_run(run["run_id"])
+        await task
+        return events
+
+    events = asyncio.run(cancel_during_stream())
+    done = events[-1]
+
+    assert events[0] == {"type": "token", "content": "partial output"}
+    assert done["status"] == "interrupted"
+    assert done["content"] == "本次任务已中断"
+    assert done["_reset_checkpoint"] is True
+    assert [message.content for message in done["_session_messages"]] == [
+        "do work",
+        "本次任务已中断",
+    ]
+    assert extractor.called is False
+    assert manager.run_manager.get_run(run["run_id"])["status"] == "interrupted"
+
+
+def test_interrupted_messages_keep_only_complete_tool_call_groups() -> None:
+    completed_call = AIMessage(
+        content="",
+        tool_calls=[{
+            "id": "completed",
+            "name": "read_file",
+            "args": {"path": "README.md"},
+            "type": "tool_call",
+        }],
+    )
+    completed_result = ToolMessage(
+        content="README",
+        tool_call_id="completed",
+        name="read_file",
+    )
+    dangling_call = AIMessage(
+        content="",
+        tool_calls=[{
+            "id": "dangling",
+            "name": "terminal",
+            "args": {"command": "pytest"},
+            "type": "tool_call",
+        }],
+    )
+
+    kept = AgentManager._completed_interrupted_messages([
+        HumanMessage(content="inspect"),
+        completed_call,
+        completed_result,
+        dangling_call,
+    ])
+
+    assert kept == [
+        kept[0],
+        completed_call,
+        completed_result,
+        kept[-1],
+    ]
+    assert kept[0].content == "inspect"
+    assert kept[-1].content == "本次任务已中断"
+    assert dangling_call not in kept
+
+
 async def _collect_agent_events(
     manager: AgentManager,
     message: str,
@@ -366,6 +469,7 @@ def test_fastapi_exposes_only_core_application_routes() -> None:
         "/api/sessions/{session_id}/messages",
         "/api/sessions/{session_id}/history",
         "/api/sessions/{session_id}/generate-title",
+        "/api/runs/{run_id}/cancel",
         "/api/files",
         "/api/skills",
     }.issubset(paths)

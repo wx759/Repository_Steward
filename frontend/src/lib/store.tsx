@@ -5,6 +5,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import {
   createSession,
   createWorkspace,
+  cancelRun,
   deleteSession,
   getSessionHistory,
   listSessions,
@@ -23,7 +24,7 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   toolCalls: ToolCall[];
-  status?: "incomplete" | "error";
+  status?: "incomplete" | "interrupted" | "error";
   recoveryMessage?: string;
 };
 
@@ -36,10 +37,12 @@ type AppStore = {
   currentSessionId: string | null;
   messages: Message[];
   isStreaming: boolean;
+  activeRunId: string | null;
   sidebarWidth: number;
   createNewSession: () => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   sendMessage: (value: string) => Promise<void>;
+  cancelCurrentRun: () => Promise<void>;
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
   setSidebarWidth: (width: number) => void;
@@ -90,6 +93,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(308);
   const currentSession = sessions.find((item) => item.id === currentSessionId);
   const currentWorkspace = workspaces.find(
@@ -174,6 +178,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
               recoveryMessage: String(data.message ?? "正在尝试恢复模型调用……")
             }));
           } else if (event === "run") {
+            const nextRunId = String(data.run_id ?? "");
+            if (nextRunId) setActiveRunId(nextRunId);
             void listRuns(sessionId).then(setRuns);
           } else if (event === "tool_start") {
             patchAssistant((message) => ({
@@ -201,7 +207,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             patchAssistant((message) => ({
               ...message,
               content: message.content || String(data.content ?? ""),
-              status: data.status === "incomplete" || data.status === "error"
+              status: data.status === "incomplete" || data.status === "error" || data.status === "interrupted"
                 ? data.status
                 : undefined,
               recoveryMessage: undefined
@@ -221,8 +227,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       await refreshSessions();
       await refreshSessionDetails(sessionId);
     } finally {
+      setActiveRunId(null);
       setIsStreaming(false);
     }
+  }
+
+  async function cancelCurrentRun() {
+    let runId = activeRunId;
+    if (!runId && currentSessionId) {
+      const latestRuns = await listRuns(currentSessionId);
+      runId = latestRuns.find((run) => run.status === "running")?.run_id ?? null;
+    }
+    if (!runId) return;
+    await cancelRun(runId);
+    if (currentSessionId) setRuns(await listRuns(currentSessionId));
   }
 
   async function renameCurrentSession(title: string) {
@@ -264,8 +282,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   return <StoreContext.Provider value={{
     sessions, workspaces, selectedWorkspaceId, currentWorkspace, runs,
-    currentSessionId, messages, isStreaming, sidebarWidth,
-    createNewSession, selectSession, sendMessage, renameCurrentSession, removeSession,
+    currentSessionId, messages, isStreaming, activeRunId, sidebarWidth,
+    createNewSession, selectSession, sendMessage, cancelCurrentRun, renameCurrentSession, removeSession,
     setSidebarWidth,
     setSelectedWorkspaceId: (workspaceId) => {
       setSelectedWorkspaceId(workspaceId);

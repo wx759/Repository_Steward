@@ -86,6 +86,7 @@ class AgentManager:
         self._workspace_runtimes: dict[str, WorkspaceRuntime] = {}
         self.delegation_service: DelegationService | None = None
         self.run_manager: RunManager | None = None
+        self._active_run_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def initialize(
         self,
@@ -106,6 +107,7 @@ class AgentManager:
         self.tools = []
         self._workspace_runtimes = {}
         self.run_manager = RunManager(base_dir)
+        self._active_run_tasks = {}
         self.context_manager = ContextManager(
             base_dir,
             ContextPolicy(
@@ -313,6 +315,50 @@ class AgentManager:
         if self.checkpointer is not None:
             await self.checkpointer.adelete_thread(session_id)
 
+    async def reset_checkpoint(self, session_id: str) -> None:
+        if self.checkpointer is not None:
+            await self.checkpointer.adelete_thread(session_id)
+
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        if self.run_manager is None:
+            raise RuntimeError("Run manager is not initialized")
+        run = self.run_manager.get_run(run_id)
+        if run.get("status") != "running":
+            return run
+        run = self.run_manager.interrupt_run(run_id)
+        task = self._active_run_tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+        return run
+
+    @staticmethod
+    def _completed_interrupted_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+        """Keep the user input and only complete tool-call/result groups."""
+        tool_results = {
+            str(message.tool_call_id)
+            for message in messages
+            if isinstance(message, ToolMessage)
+        }
+        kept: list[AnyMessage] = [
+            message for message in messages if isinstance(message, HumanMessage)
+        ][:1]
+        accepted_call_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message, AIMessage) or not message.tool_calls:
+                continue
+            call_ids = {str(call.get("id", "")) for call in message.tool_calls}
+            if call_ids and call_ids.issubset(tool_results):
+                kept.append(message)
+                accepted_call_ids.update(call_ids)
+                kept.extend(
+                    item
+                    for item in messages
+                    if isinstance(item, ToolMessage)
+                    and str(item.tool_call_id) in call_ids
+                )
+        kept.append(AIMessage(content="本次任务已中断"))
+        return kept
+
     async def _select_memory_context(self, user_request: str, workspace_id: str) -> str:
         if self.memory_store is None or self.memory_selector is None:
             return ""
@@ -366,6 +412,7 @@ class AgentManager:
         history: list[Any],
         *,
         session_id: str = "default",
+        run_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         turn_messages = self._build_messages(history)
         current_user_message = HumanMessage(content=message)
@@ -398,31 +445,128 @@ class AgentManager:
             raw_turn_snapshot=raw_turn_snapshot,
         )
 
-        async for mode, payload in self._build_agent(session_id).astream(
-            {"messages": turn_messages},
-            config=self._thread_config(session_id),
-            context=run_context,
-            stream_mode=["messages", "updates", "custom"],
+        current_task = asyncio.current_task()
+        if run_id and current_task is not None:
+            self._active_run_tasks[run_id] = current_task
+        interrupted = False
+        try:
+            if run_id and self.run_manager is not None:
+                if self.run_manager.get_run(run_id).get("status") == "interrupted":
+                    raise asyncio.CancelledError
+            async for mode, payload in self._build_agent(session_id).astream(
+                {"messages": turn_messages},
+                config=self._thread_config(session_id),
+                context=run_context,
+                stream_mode=["messages", "updates", "custom"],
+            ):
+                if run_id and self.run_manager is not None:
+                    if self.run_manager.get_run(run_id).get("status") == "interrupted":
+                        raise asyncio.CancelledError
+                async for event in self._events_from_graph_payload(
+                    mode,
+                    payload,
+                    run_context,
+                    persisted_turn_messages,
+                    pending_tools,
+                    final_content_parts,
+                ):
+                    if event.get("_last_ai"):
+                        last_ai_message = str(event.pop("_last_ai"))
+                    else:
+                        yield event
+        except asyncio.CancelledError:
+            interrupted = True
+            if run_id and self.run_manager is not None:
+                if self.run_manager.get_run(run_id).get("status") == "running":
+                    self.run_manager.interrupt_run(run_id, reason="execution_cancelled")
+        finally:
+            if run_id:
+                self._active_run_tasks.pop(run_id, None)
+
+        if interrupted:
+            yield {
+                "type": "done",
+                "content": "本次任务已中断",
+                "status": "interrupted",
+                "reason": "user_cancelled",
+                "continuation_count": 0,
+                "_session_messages": self._completed_interrupted_messages(
+                    persisted_turn_messages
+                ),
+                "_reset_checkpoint": True,
+            }
+            return
+
+        final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
+        if final_content and not any(
+            isinstance(item, AIMessage)
+            and not item.tool_calls
+            and _stringify_content(item.content).strip() == final_content
+            for item in persisted_turn_messages
         ):
+            persisted_turn_messages.append(AIMessage(content=final_content))
+        final_ai = next(
+            (
+                item
+                for item in reversed(persisted_turn_messages)
+                if isinstance(item, AIMessage) and not item.tool_calls
+            ),
+            None,
+        )
+        recovery = (
+            final_ai.additional_kwargs.get("recovery", {})
+            if final_ai is not None
+            else {}
+        )
+        if final_content and recovery.get("status", "completed") != "error":
+            await self._extract_turn_memories(
+                list(run_context.raw_turn_snapshot),
+                workspace.workspace_id,
+            )
+        if self.run_manager is not None:
+            self.run_manager.finish_session_run(
+                session_id,
+                failed=recovery.get("status") == "error",
+                reason=recovery.get("reason"),
+                error=(final_content if recovery.get("status") == "error" else None),
+            )
+        yield {
+            "type": "done",
+            "content": final_content,
+            "status": recovery.get("status", "completed"),
+            "reason": recovery.get("reason"),
+            "continuation_count": recovery.get("continuation_count", 0),
+            "_session_messages": persisted_turn_messages,
+        }
+
+    async def _events_from_graph_payload(
+        self,
+        mode: str,
+        payload: Any,
+        run_context: AgentRunContext,
+        persisted_turn_messages: list[AnyMessage],
+        pending_tools: dict[str, dict[str, str]],
+        final_content_parts: list[str],
+    ) -> AsyncIterator[dict[str, Any]]:
             if mode == "custom":
                 if isinstance(payload, dict) and payload.get("type") in {"recovery", "run"}:
                     yield payload
-                continue
+                return
 
             if mode == "messages":
                 chunk, metadata = payload
                 node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
                 if node is not None and node not in {"agent", "model"}:
-                    continue
+                    return
                 text = _stringify_content(getattr(chunk, "content", ""))
                 if text:
                     run_context.recovery_state.current_stream_text += text
                     final_content_parts.append(text)
                     yield {"type": "token", "content": text}
-                continue
+                return
 
             if mode != "updates":
-                continue
+                return
 
             for node_name, update in payload.items():
                 if not update:
@@ -455,7 +599,7 @@ class AgentManager:
                     if message_type == "ai" and not tool_calls:
                         candidate = _stringify_content(getattr(agent_message, "content", ""))
                         if candidate:
-                            last_ai_message = candidate
+                            yield {"_last_ai": candidate}
 
                     for tool_call in tool_calls:
                         call_id = str(tool_call.get("id") or tool_call.get("name"))
@@ -484,46 +628,6 @@ class AgentManager:
                             "output": _stringify_content(getattr(agent_message, "content", "")),
                         }
                         yield {"type": "new_response"}
-
-        final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
-        if final_content and not any(
-            isinstance(item, AIMessage)
-            and not item.tool_calls
-            and _stringify_content(item.content).strip() == final_content
-            for item in persisted_turn_messages
-        ):
-            persisted_turn_messages.append(AIMessage(content=final_content))
-        final_ai = next(
-            (
-                item
-                for item in reversed(persisted_turn_messages)
-                if isinstance(item, AIMessage) and not item.tool_calls
-            ),
-            None,
-        )
-        recovery = (
-            final_ai.additional_kwargs.get("recovery", {})
-            if final_ai is not None
-            else {}
-        )
-        if final_content and recovery.get("status", "completed") != "error":
-            await self._extract_turn_memories(
-                list(run_context.raw_turn_snapshot),
-                workspace.workspace_id,
-            )
-        if self.run_manager is not None:
-            self.run_manager.finish_session_run(
-                session_id,
-                failed=recovery.get("status") == "error",
-            )
-        yield {
-            "type": "done",
-            "content": final_content,
-            "status": recovery.get("status", "completed"),
-            "reason": recovery.get("reason"),
-            "continuation_count": recovery.get("continuation_count", 0),
-            "_session_messages": persisted_turn_messages,
-        }
 
     async def generate_title(self, first_user_message: str) -> str:
         prompt = (
