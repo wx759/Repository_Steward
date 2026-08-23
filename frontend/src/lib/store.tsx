@@ -29,6 +29,7 @@ type Message = {
 };
 
 type AppStore = {
+  activeView: "chat" | "memory";
   sessions: SessionSummary[];
   workspaces: Workspace[];
   selectedWorkspaceId: string;
@@ -46,6 +47,7 @@ type AppStore = {
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
   setSidebarWidth: (width: number) => void;
+  setActiveView: (view: "chat" | "memory") => void;
   setSelectedWorkspaceId: (workspaceId: string) => void;
   addWorkspace: (rootPath: string, name?: string) => Promise<Workspace>;
 };
@@ -86,6 +88,7 @@ function toUiMessages(history: Awaited<ReturnType<typeof getSessionHistory>>["me
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
+  const [activeView, setActiveView] = useState<"chat" | "memory">("chat");
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
@@ -111,6 +114,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
 
   async function createNewSession() {
+    setActiveView("chat");
     setCurrentSessionId(null);
     setMessages([]);
     setRuns([]);
@@ -128,6 +132,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
 
   async function selectSession(sessionId: string) {
+    setActiveView("chat");
     setCurrentSessionId(sessionId);
     const session = sessions.find((item) => item.id === sessionId);
     if (session?.workspace_id) setSelectedWorkspaceId(session.workspace_id);
@@ -281,10 +286,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return <StoreContext.Provider value={{
-    sessions, workspaces, selectedWorkspaceId, currentWorkspace, runs,
+    activeView, sessions, workspaces, selectedWorkspaceId, currentWorkspace, runs,
     currentSessionId, messages, isStreaming, activeRunId, sidebarWidth,
     createNewSession, selectSession, sendMessage, cancelCurrentRun, renameCurrentSession, removeSession,
-    setSidebarWidth,
+    setSidebarWidth, setActiveView,
     setSelectedWorkspaceId: (workspaceId) => {
       setSelectedWorkspaceId(workspaceId);
       setCurrentSessionId(null);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, FolderGit2, MessageSquare, Plus, Trash2, X } from "lucide-react";
+import { Brain, Check, FolderGit2, MessageSquare, Plus, Trash2, X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import { discoverRepositories, getWorkspaceConfig } from "@/lib/api";
 
@@ -11,7 +11,7 @@ function formatTime(timestamp: number) {
 }
 
 export function Sidebar({ onSelect }: { onSelect?: () => void }) {
-  const { sessions, currentSessionId, selectSession, createNewSession, removeSession, workspaces, selectedWorkspaceId, setSelectedWorkspaceId, addWorkspace } = useAppStore();
+  const { activeView, setActiveView, sessions, currentSessionId, selectSession, createNewSession, removeSession, workspaces, selectedWorkspaceId, setSelectedWorkspaceId, addWorkspace } = useAppStore();
   const [showAdd, setShowAdd] = useState(false);
   const [path, setPath] = useState("");
   const [error, setError] = useState("");
@@ -39,6 +39,8 @@ export function Sidebar({ onSelect }: { onSelect?: () => void }) {
     <aside className="sidebar-shell flex h-full flex-col overflow-hidden">
       <div className="px-4 pb-3 pt-5"><div className="flex items-center gap-2.5"><div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#212121] text-white"><FolderGit2 size={17} /></div><div><p className="text-[10px] font-medium uppercase tracking-[0.16em] text-[#8a8a8a]">Repository</p><p className="text-sm font-medium text-[#212121]">Steward</p></div></div></div>
       <div className="px-3"><button className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-[#dedede] bg-white text-sm font-medium text-[#212121] transition hover:bg-[#ececec]" onClick={() => void createNewSession()} type="button"><Plus size={16} /> 新任务</button></div>
+
+      <div className="mt-2 px-3"><button className={`flex h-10 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium transition ${activeView === "memory" ? "bg-[#e2f3ee] text-[#087f5f]" : "text-[#555] hover:bg-[#ececec]"}`} onClick={() => { setActiveView("memory"); onSelect?.(); }} type="button"><Brain size={16} /> 长期记忆<span className="ml-auto rounded-full bg-white/70 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider">审核</span></button></div>
 
       <div className="mt-5 px-3">
         <div className="mb-2 flex items-center justify-between px-1"><span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[#8a8a8a]">Workspace</span><button className="flex h-6 w-6 items-center justify-center rounded-md text-[#777] transition hover:bg-[#e7e7e7] hover:text-[#212121]" onClick={() => void openAdd()} title="添加本地仓库" type="button"><Plus size={14} /></button></div>

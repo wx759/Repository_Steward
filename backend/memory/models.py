@@ -21,6 +21,7 @@ class MemoryDraft:
     description: str
     body: str
     workspace_id: str | None = None
+    evidence_quote: str = ""
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class MemoryMetadata:
     created_at: str
     updated_at: str
     workspace_id: str | None = None
+    evidence_quote: str = ""
 
 
 @dataclass(frozen=True)

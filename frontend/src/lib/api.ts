@@ -21,6 +21,19 @@ export type Workspace = {
   branch: string;
 };
 
+export type MemoryRecord = {
+  id: string;
+  name: string;
+  type: "user" | "project" | "feedback" | "reference";
+  description: string;
+  body: string;
+  status: "active" | "superseded" | "archived";
+  created_at: string;
+  updated_at: string;
+  workspace_id: string | null;
+  evidence_quote: string;
+};
+
 export type RunTask = {
   task_id: string;
   role: string;
@@ -88,6 +101,23 @@ export function listSessions() {
 
 export function listWorkspaces() {
   return request<Workspace[]>("/workspaces");
+}
+
+export function listMemories(
+  workspaceId: string,
+  filters: { status?: MemoryRecord["status"]; type?: MemoryRecord["type"] } = {}
+) {
+  const params = new URLSearchParams({ workspace_id: workspaceId });
+  if (filters.status) params.set("status", filters.status);
+  if (filters.type) params.set("type", filters.type);
+  return request<MemoryRecord[]>(`/memories?${params.toString()}`);
+}
+
+export function archiveMemory(memoryId: string, workspaceId: string) {
+  return request<{ ok: boolean }>(`/memories/${encodeURIComponent(memoryId)}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ workspace_id: workspaceId })
+  });
 }
 
 export function createWorkspace(rootPath: string, name?: string) {

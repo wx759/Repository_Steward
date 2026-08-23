@@ -4,10 +4,11 @@ import { ChatPanel } from "@/components/chat/ChatPanel";
 import { Navbar } from "@/components/layout/Navbar";
 import { ResizeHandle } from "@/components/layout/ResizeHandle";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { MemoryManager } from "@/components/memory/MemoryManager";
 import { AppProvider, useAppStore } from "@/lib/store";
 
 function Workspace() {
-  const { sidebarWidth, setSidebarWidth } = useAppStore();
+  const { activeView, sidebarWidth, setSidebarWidth } = useAppStore();
 
   return (
     <main className="h-screen overflow-hidden bg-white">
@@ -19,7 +20,7 @@ function Workspace() {
         <div className="flex min-w-0 flex-1 flex-col">
           <Navbar />
           <div className="min-h-0 flex-1">
-            <ChatPanel />
+            {activeView === "memory" ? <MemoryManager /> : <ChatPanel />}
           </div>
         </div>
       </div>

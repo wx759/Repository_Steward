@@ -8,6 +8,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from api.chat import router as chat_router
 from api.files import router as files_router
+from api.memories import router as memories_router
 from api.sessions import router as sessions_router
 from api.workspaces import router as workspaces_router
 from api.runs import router as runs_router
@@ -44,6 +45,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(sessions_router, prefix="/api", tags=["sessions"])
 app.include_router(files_router, prefix="/api", tags=["files"])
+app.include_router(memories_router, prefix="/api", tags=["memories"])
 app.include_router(workspaces_router, prefix="/api", tags=["workspaces"])
 app.include_router(runs_router, prefix="/api", tags=["runs"])
 

@@ -208,6 +208,7 @@ class MemoryExtractor:
                 draft = replace(
                     draft,
                     workspace_id=None if draft.type == "user" else workspace_id,
+                    evidence_quote=operation.evidence_quote,
                 )
                 if _contains_secret(draft):
                     continue
