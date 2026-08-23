@@ -17,7 +17,7 @@ Repository Steward 是一个面向本地 Git 仓库的 AI 代码维护助手。�
 - Repository 发现、注册、选择与 Session 固定绑定；
 - 基于 LangChain `create_agent` 的多轮工具调用；
 - 仓库内 `read_file`、`write_file`、`terminal` 工具；
-- 复杂任务的 `delegate_task`、角色 Worker、路径权限和统一 Review；
+- 复杂任务的 `delegate_task`、统一 PermissionScope、结构化命令和统一 Review；
 - FastAPI + SSE 流式文本、工具轨迹、恢复状态与 Run 状态；
 - JSON 完整会话归档和 SQLite LangGraph Checkpoint；
 - 按用户与仓库隔离的 SQLite 长期记忆；
@@ -258,16 +258,35 @@ Run 状态包括 `running`、`completed`、`interrupted` 和 `failed`。同一 S
 ```text
 Steward 创建 TaskSpec
   ↓
+仓库规则 ∩ 角色规则 ∩ TaskSpec 权限申请
+  ↓
+生成本次 Worker 的 PermissionScope
+  ↓
+记录 Worker 执行前的 Git 文件状态
+  ↓
 Backend / Frontend / Test / General Worker
   ↓
-返回结构化 WorkerResult
-  ↓
-只读 Reviewer 根据验收标准和 git diff 检查
-  ├─ 通过：返回 Steward
-  └─ 失败：携带 feedback 返修，最多两轮
+计算任务产生的真实变更并检查是否越权
+  ├─ 越权：直接判定失败，不进入 Reviewer
+  └─ 未越权：Reviewer 只检查质量和验收标准
+       ├─ 通过：返回 Steward
+       └─ 失败：携带 feedback 返修，最多两轮
 ```
 
-Worker 只收到 `TaskSpec`、Reviewer feedback 和当前 Repository 工具，不继承 Steward 完整对话、Checkpoint 或 Memory。Worker 可以读取整个仓库，但写入受 `allowed_paths` 限制；Reviewer 没有写文件权限，终端也只允许测试和检查类命令。
+Worker 只收到 `TaskSpec`、Reviewer feedback 和当前 Repository 的受限工具，不继承 Steward 完整对话、Checkpoint 或 Memory。所有 Worker 工具共享同一个 `PermissionScope`：
+
+- Repository Policy 规定整个系统不可访问的敏感路径，例如 `.git`、`.env*`、`*.pem` 和 `*.key`；
+- Role Policy 规定角色上限，例如 Backend Worker 最多写 `backend/**`，Frontend Worker 最多写 `frontend/**`；
+- Task Policy 由 `allowed_paths` 和 `allowed_commands` 表达，只能在角色上限内进一步缩小权限；
+- General Worker 必须显式申请写入路径，不会因为角色是 `general` 就自动获得 `**`。
+
+最终权限采用交集而不是覆盖。例如 Backend Worker 申请 `backend/auth/**` 时，只能修改该子目录；即使申请 `**` 或 `frontend/**`，也不能扩大 Backend Role 的 `backend/**` 上限。
+
+Worker 不再拥有接收任意字符串的 `terminal`。它只能调用结构化的 `run_command`：命令名限定为 `pytest`、`ruff_check`、`mypy`、`npm_test`、`npm_lint` 或 `npm_build`，并且还必须出现在本次 Task 的 `allowed_commands` 中。命令通过参数数组和 `shell=False` 启动；目标只接受仓库相对路径，不能传 Shell 运算符或任意命令行参数。
+
+系统不会信任模型返回的 `changed_files`。委派开始前，`GitChangeTracker` 记录 tracked 与 untracked 文件的内容指纹；Worker 每轮结束后再次采集，计算相对于任务开始时的真实新增、修改和删除文件。真实变更会覆盖模型自报结果，再交给 `PermissionScope` 检查。这样用户在任务开始前已有的未提交修改不会被错误归到 Worker 名下。
+
+权限检查和质量审核彼此分离：`PermissionScope` 与 `GitChangeTracker` 判断“有没有越权”，Reviewer 只判断“实现是否满足验收标准”。Reviewer 没有写文件工具，检查命令也使用相同的结构化命令入口。
 
 Worker 最终统一返回：
 
@@ -281,16 +300,58 @@ issues
 
 Worker 内部消息和工具轨迹不会进入 Steward 的长期上下文，Steward 只接收结构化结果。Run/Task 状态保存到 `backend/runs/*.json`，前端按顺序展示执行与 Review 状态。
 
-## 本地启动（Conda，推荐）
+## 本地启动
 
 ### 环境要求
 
 - Python 3.11 或兼容版本；
-- Miniconda / Anaconda；
 - Node.js 20+ 和 npm；
 - 一个 OpenAI-compatible 模型 API Key。
 
-### 1. 创建后端环境
+### 公共配置
+
+先复制后端配置文件：
+
+```bash
+cp backend/config/.env.example backend/config/.env
+```
+
+Windows PowerShell 使用：
+
+```powershell
+Copy-Item backend/config/.env.example backend/config/.env
+```
+
+然后编辑 `backend/config/.env`，填写模型服务配置：
+
+```dotenv
+LLM_PROVIDER=bailian
+LLM_MODEL=qwen3.7-plus
+LLM_API_KEY=请填写你的百炼_API_Key
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+```
+
+`WORKSPACE_ROOT` 应填写所有待维护仓库的共同父目录，`DEFAULT_WORKSPACE_RELATIVE_PATH` 填写当前项目相对于该目录的路径。例如：
+
+macOS：
+
+```dotenv
+WORKSPACE_ROOT=/Users/你的用户名/VSCodeProject
+DEFAULT_WORKSPACE_RELATIVE_PATH=codeAgent
+```
+
+Windows：
+
+```dotenv
+WORKSPACE_ROOT=C:\Users\你的用户名\VSCodeProject
+DEFAULT_WORKSPACE_RELATIVE_PATH=codeAgent
+```
+
+当前前端会隐藏 Repository Steward 自身仓库。
+
+### macOS
+
+推荐使用 Miniconda / Anaconda 创建后端环境：
 
 ```bash
 conda create -n codeagent python=3.11 -y
@@ -306,52 +367,70 @@ exec zsh
 conda activate codeagent
 ```
 
-### 2. 配置阿里云百炼
-
-复制配置文件：
-
-```bash
-cp backend/config/.env.example backend/config/.env
-```
-
-修改 `backend/config/.env`：
-
-```dotenv
-LLM_PROVIDER=bailian
-LLM_MODEL=qwen3.7-plus
-LLM_API_KEY=请填写你的百炼_API_Key
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-
-WORKSPACE_ROOT=/Users/你的用户名/VSCodeProject
-DEFAULT_WORKSPACE_RELATIVE_PATH=codeAgent
-```
-
-`WORKSPACE_ROOT` 应填写所有待维护仓库的共同父目录。`DEFAULT_WORKSPACE_RELATIVE_PATH` 用于后端初始化兼容；当前前端会隐藏 Repository Steward 自身仓库。
-
-### 3. 启动后端
-
-```bash
-cd backend
-conda run -n codeagent uvicorn app:app --host 127.0.0.1 --port 8002
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8002/health
-```
-
-### 4. 启动前端
-
-打开另一个终端：
+安装前端依赖：
 
 ```bash
 cd frontend
 npm install
-npm run dev -- --hostname 127.0.0.1
+cd ..
 ```
 
-访问：<http://127.0.0.1:7788>
+使用 macOS 服务脚本启动：
+
+```bash
+./start_services.sh start
+```
+
+其他管理命令：
+
+```bash
+./start_services.sh status
+./start_services.sh restart
+./start_services.sh stop
+```
+
+脚本优先使用 `backend/.venv/bin/python`；如果该文件不存在，则使用 Conda 的 `codeagent` 环境。
+
+### Windows
+
+在项目根目录使用 PowerShell 创建后端虚拟环境并安装依赖：
+
+```powershell
+py -3.11 -m venv backend\.venv
+.\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+```
+
+安装前端依赖：
+
+```powershell
+Set-Location frontend
+npm.cmd install
+Set-Location ..
+```
+
+启动前后端服务：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start_services.ps1
+```
+
+其他管理命令：
+
+```powershell
+.\start_services.ps1 -Status
+.\start_services.ps1 -Restart
+.\start_services.ps1 -Stop
+```
+
+如果当前 PowerShell 的执行策略不允许直接执行 `.ps1`，可以继续使用带有 `-ExecutionPolicy Bypass` 的完整命令。
+
+### 访问地址
+
+- 前端：<http://127.0.0.1:7788>
+- 后端：<http://127.0.0.1:8002>
+- 后端健康检查：<http://127.0.0.1:8002/health>
+
+两个服务脚本都会把标准输出、错误日志和进程状态保存在 `.repository_steward/dev_services/`。
 
 首次使用时，在左侧 Workspace 区域选择自动发现的 Git 仓库，或点击 `+` 输入仓库路径。
 
@@ -445,7 +524,7 @@ cd frontend
 npm run build
 ```
 
-测试覆盖 Workspace 隔离、Session schema、Checkpoint 恢复、Memory scope 与证据约束、分层上下文压缩、工具调用组完整性、Worker 权限、Reviewer 返修、异常分类、退避重试、强制 L4 和输出续写。
+测试覆盖 Workspace 隔离、Session schema、Checkpoint 恢复、Memory scope 与证据约束、分层上下文压缩、工具调用组完整性、PermissionScope 权限求交、结构化命令、Git 真实变更检测、Reviewer 返修、异常分类、退避重试、强制 L4 和输出续写。
 
 ## 当前边界
 
@@ -456,4 +535,6 @@ npm run build
 - L4 摘要是有损压缩，重要仓库事实必须重新通过工具确认；
 - 故障恢复只处理模型调用，不会自动修复任意终端命令或业务错误；
 - Worker 当前串行委派，未实现并行 DAG、远程执行和分布式队列；
-- Agent 可以执行命令和修改所选仓库，使用前应确认仓库已纳入版本控制，并检查工具调用记录与 `git diff`。
+- Worker 仍直接修改当前 Workspace；Git 越权检测会将任务判为失败，但不会自动回滚文件，以免覆盖用户原有未提交修改；
+- 结构化命令消除了任意 Shell 字符串入口，但测试或构建程序本身仍可能产生副作用；执行不可信代码时仍应增加容器或 Git worktree 隔离；
+- Steward 处理小任务时仍使用普通 Repository 工具，不经过 Worker PermissionScope；使用前应检查工具调用记录与 `git diff`。

@@ -409,13 +409,13 @@ tests_run
 issues
 ```
 
-只读 Reviewer 根据验收条件和 Git diff 检查结果；失败时最多返修两轮。
+只读 Reviewer 根据验收条件和系统计算出的真实任务 Diff 检查结果；失败时最多返修两轮。
 
 ### 为什么这么做
 
 如果存在多个长期 Agent 并共享对话、Checkpoint 和 Memory，会增加状态归属、消息同步和冲突处理的复杂度。
 
-当前设计让 Steward 成为唯一对话负责人，Worker 只是一次性受限执行器。Worker 工具轨迹不会持续膨胀 Steward 上下文，权限也可以按 `allowed_paths` 限制。
+当前设计让 Steward 成为唯一对话负责人，Worker 只是一次性受限执行器。Worker 工具轨迹不会持续膨胀 Steward 上下文，权限由统一的 `PermissionScope` 控制。
 
 ### 有没有其他方式
 
@@ -425,7 +425,150 @@ issues
 
 可以使用并行 DAG 调度多个 Worker，效率更高，但需要 Worktree、写冲突检测、任务依赖和联动取消。当前项目暂时采用串行委派保证可控性。
 
-## 十一、当前方案的不足与演进方向
+## 十一、如何限制 Worker 的工作范围
+
+### 问题是怎么发现的
+
+第一版实现给 `TaskSpec` 增加了 `allowed_paths`，例如 Backend Worker 只能修改：
+
+```text
+backend/**
+```
+
+系统在 `write_file` 前检查目标路径，越界写入会被拒绝。这个方案表面上能够限制 Worker，但我进一步检查后发现，Worker 同时拥有接收任意字符串的 `terminal`。
+
+因此它虽然不能执行：
+
+```text
+write_file("frontend/app.ts")
+```
+
+却可能通过下面的命令实现同样的效果：
+
+```bash
+echo "changed" > frontend/app.ts
+```
+
+这说明只保护一个写文件工具是不完整的。Agent 的副作用通道可能包括文件工具、Terminal、Git、测试脚本和构建脚本；只要存在未受控制的第二条通道，`allowed_paths` 就可能被绕过。
+
+### 我是怎么做的
+
+我把权限抽象成统一的 `PermissionScope`，让读取、写入和命令执行共享同一份确定性权限对象。
+
+最终权限来自三层规则的交集：
+
+```text
+Repository Policy
+        ∩
+Role Policy
+        ∩
+Task Policy
+        ↓
+Effective PermissionScope
+```
+
+三层分别负责：
+
+| 层次 | 职责 | 示例 |
+|---|---|---|
+| Repository Policy | 系统级边界和敏感文件拒绝规则 | 禁止 `.git`、`.env*`、`*.pem`、`*.key` |
+| Role Policy | Worker 角色的最大权限 | Backend 最多写 `backend/**` |
+| Task Policy | 当前任务申请的最小范围 | 本次只申请 `backend/auth/**` |
+
+权限不是用 Task 参数覆盖 Role，而是每次访问时同时满足三层规则。例如：
+
+```text
+Backend Role：backend/**
+Task 申请：backend/auth/**
+最终可写：backend/auth/**
+```
+
+如果 Steward 错误地申请：
+
+```text
+allowed_paths=["**"]
+```
+
+最终权限仍不能超过 Backend Role 的 `backend/**`。也就是说，上层 Agent 只能申请或缩小权限，不能改变系统设置的权限上限。General Worker 如果没有显式提供 `allowed_paths`，则默认没有写权限。
+
+`TaskSpec` 同时增加了 `allowed_commands`。Worker 不再拿到通用 `terminal(command: str)`，而是只能调用结构化命令工具：
+
+```text
+run_command(
+    command="pytest",
+    targets=["backend/tests/test_auth.py::test_login"]
+)
+```
+
+支持的命令标识固定为：
+
+```text
+pytest
+ruff_check
+mypy
+npm_test
+npm_lint
+npm_build
+```
+
+系统把命令标识转换为固定参数数组，通过 `subprocess.run(..., shell=False)` 执行。目标参数只能是仓库相对路径，不能传入 Shell 运算符、重定向或任意命令行 flags。命令还必须同时属于 Role Policy 和当前 Task 的 `allowed_commands`。
+
+最后，我没有继续相信 Worker 自己返回的 `changed_files`。模型输出只能作为执行摘要，不能作为安全事实。系统在 Worker 开始前通过 Git 记录 tracked 和 untracked 文件的内容指纹，执行后再次采集，计算相对于任务起点的真实新增、修改和删除文件：
+
+```text
+执行前 Git 文件状态
+        ↓
+Worker 执行
+        ↓
+执行后 Git 文件状态
+        ↓
+计算真实 changed_files
+        ↓
+PermissionScope 越界检查
+        ↓
+通过后才进入 Reviewer
+```
+
+这样即使 Worker 自报只修改了 `backend/auth.py`，系统检测到它还修改了 `frontend/app.ts`，任务仍会在权限层直接失败。用户在 Worker 启动前已有的未提交修改保存在基线中，不会被错误归到 Worker 名下。
+
+Reviewer 的职责也因此更清晰：
+
+```text
+PermissionScope + GitChangeTracker：有没有越权
+Reviewer：代码是否满足验收标准
+```
+
+Reviewer 不再承担安全判断，也不能用“模型审核通过”代替确定性权限检查。
+
+### 为什么这么做
+
+Prompt 只能告诉模型“应该做什么”，不能保证模型“只能做什么”。模型可能误解任务，也可能通过另一种工具完成同一个副作用。因此安全边界必须放在模型外部，由普通代码强制执行。
+
+这套设计体现了三个原则：
+
+1. 最小权限：任务只获得完成当前工作所需的路径和命令；
+2. 不信任自报：修改范围来自真实文件状态，而不是模型生成文本；
+3. 职责分离：权限系统判断越权，Reviewer 判断质量。
+
+### 有没有其他方式
+
+最简单的方案是只在 Prompt 中要求 Worker 不要越界。实现成本最低，但它属于行为引导，不是可靠的权限边界。
+
+可以继续使用任意 Shell，并尝试维护危险命令黑名单。但 Shell 语法、重定向、脚本和子进程组合非常多，黑名单很难穷举，因此当前项目选择完全移除 Worker 的字符串 Shell 入口。
+
+更强的方案是为每个 Worker 创建独立 Git worktree、容器或 microVM。这样即使命令或测试程序本身产生副作用，也能限制在隔离环境中，并在验收通过后再合并补丁。这种方案隔离更强，但需要处理环境镜像、依赖缓存、文件同步、冲突合并和资源回收，当前版本暂未引入。
+
+当前实现仍直接修改真实 Workspace。发现越界后会将任务判定为失败，但不会自动回滚，因为直接恢复文件可能覆盖用户同时进行的修改。后续如果引入 worktree，就可以在失败时直接丢弃临时工作区，实现更安全的回滚。
+
+### 面试时可以怎么说
+
+> 项目最初通过 `allowed_paths` 限制 Worker 的写文件范围，但我发现它只保护了 `write_file`，Worker 仍然可以通过 Terminal 重定向或脚本绕过。这让我意识到 Prompt 和单工具校验不能构成完整安全边界。
+>
+> 后来我把权限抽象成统一的 `PermissionScope`，把 Repository、Role 和 Task 三层策略取交集。上层 Agent 只能申请和缩小权限，不能突破角色上限。Terminal 也改成了结构化命令，只支持 pytest、ruff、mypy 和 npm 检查，并用 `shell=False` 执行。
+>
+> Worker 完成后，系统不相信它自报的 `changed_files`，而是比较任务前后的 Git 文件指纹，得到真实修改列表，再做越界检查。只有权限检查通过才进入 Reviewer；权限层判断能不能改，Reviewer 判断改得对不对。更高安全等级下还可以继续增加 worktree 或容器隔离。
+
+## 十二、当前方案的不足与演进方向
 
 面试时不要把项目描述成生产级系统，应主动说明边界：
 
@@ -449,7 +592,7 @@ issues
 6. 增加 Token、延迟、恢复成功率和任务完成率评测；
 7. 根据需求再考虑 Worktree、并行 Worker 和可恢复执行。
 
-## 十二、面试口述版本
+## 十三、面试口述版本
 
 ### 30 秒版本
 
@@ -467,7 +610,7 @@ issues
 >
 > 当前是单机工程化原型，使用 JSON 和 SQLite，后续可以将 Graph 缓存调整为 Repository 粒度，并用共享任务存储支持多实例。
 
-## 十三、高频追问速答
+## 十四、高频追问速答
 
 ### 为什么不只使用 Session？
 
@@ -509,7 +652,7 @@ Memory 是按当前请求选择的外部长期信息，不应该永久污染对�
 
 将 Agent Graph 从按 Session 缓存改为按 Repository 缓存，并将 session/run 信息从工具构造参数移入 Runtime Context；这样既能复用 Graph，又能减少大量 Session 的内存占用。
 
-## 十四、面试表达注意事项
+## 十五、面试表达注意事项
 
 推荐说法：
 

@@ -7,7 +7,7 @@ from langchain.agents import create_agent
 
 from delegation.models import TaskSpec, WorkerResult
 from delegation.parsing import parse_model
-from delegation.permissions import worker_tools
+from delegation.permissions import PermissionScope, worker_tools
 from middleware import AgentRunContext
 
 
@@ -19,7 +19,9 @@ ROLE_PROMPTS = {
 }
 
 RESULT_INSTRUCTION = """
-Work only on the supplied task. Use repository tools as needed. Do not ask the user questions.
+Work only on the supplied task and PermissionScope. Use repository tools as needed. The
+run_command tool accepts structured command identifiers, never shell strings. Do not ask the user
+questions and do not claim permissions beyond the supplied task.
 Finish by returning only one JSON object with keys: status ('success' or 'failed'), summary,
 changed_files, tests_run, issues. Do not wrap it in prose.
 """
@@ -38,9 +40,10 @@ class WorkerFactory:
         feedback: str = "",
     ) -> WorkerResult:
         prompt = f"{ROLE_PROMPTS[task.role]}\n{RESULT_INSTRUCTION}"
+        scope = PermissionScope.for_task(workspace_root, task)
         agent = create_agent(
             model=self.model,
-            tools=worker_tools(workspace_root, task.role, task.allowed_paths),
+            tools=worker_tools(scope),
             system_prompt=prompt,
             middleware=self.middleware,
             context_schema=AgentRunContext,
